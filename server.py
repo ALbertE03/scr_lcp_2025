@@ -1,8 +1,8 @@
 import socket
 import threading
 from protocol import *
-
-SERVER_USER_ID = "ServerNode"
+import uuid
+SERVER_USER_ID =  str(uuid.uuid4()).replace("-", "")[:20]
 
 def handle_udp(sock_udp):
     while True:

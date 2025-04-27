@@ -1,8 +1,8 @@
 import socket
 import random
 from protocol import *
-
-CLIENT_USER_ID = "ClientNode"
+import uuid
+CLIENT_USER_ID =  str(uuid.uuid4()).replace("-", "")[:20]
 
 def send_echo(sock_udp):
     header = pack_header(CLIENT_USER_ID, '\xFF' * 20, ECHO)
