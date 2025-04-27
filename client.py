@@ -5,6 +5,9 @@ from protocol import *
 import uuid
 import threading
 from datetime import datetime
+import time
+import os
+import sys
 
 class ChatClientGUI:
     def __init__(self, root):
@@ -16,18 +19,27 @@ class ChatClientGUI:
         self.udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.udp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
         self.udp_socket.bind(('0.0.0.0', UDP_PORT))
+        self.udp_socket.settimeout(1) 
         
         self.discovered_users = {}  
         self.active_chats = {}    
         self.current_chat = None
+        self.discovery_active = False
+        self.last_discovery_time = 0
         
         self.create_widgets()
         
         self.running = True
-        threading.Thread(target=self.discover_users_periodically, daemon=True).start()
-        threading.Thread(target=self.receive_messages, daemon=True).start()
+        threading.Thread(target=self.discovery_loop, daemon=True).start()
+        threading.Thread(target=self.receive_loop, daemon=True).start()
         
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
+        self.log("Client started. Your ID: " + self.client_id)
+    
+    def log(self, message):
+
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        print(f"[{timestamp}] {message}")
     
     def create_widgets(self):
         main_frame = ttk.Frame(self.root)
@@ -88,6 +100,7 @@ class ChatClientGUI:
                 if user_display.startswith(user_id[:10]):
                     self.current_chat = user_id
                     self.show_chat(user_id)
+                    self.log(f"Chat started with {user_id}")
                     break
     
     def show_chat(self, user_id):
@@ -117,17 +130,37 @@ class ChatClientGUI:
             self.chat_display.config(state='disabled')
             self.chat_display.see(tk.END)
     
-    def discover_users_periodically(self):
+    def discovery_loop(self):
         while self.running:
-            self.manual_discover()
-             
+            try:
+                now = time.time()
+                if now - self.last_discovery_time > 10:  
+                    self.manual_discover()
+                    self.last_discovery_time = now
+                
+                time.sleep(1)  
+                
+            except Exception as e:
+                self.log(f"Error in discovery loop: {e}")
+                time.sleep(5) 
     
     def manual_discover(self):
-        header = pack_header(self.client_id, '\xFF' * 20, ECHO)
-        self.udp_socket.sendto(header, ('<broadcast>', UDP_PORT))
-        
+        """Inicia el descubrimiento manual de usuarios"""
+        if self.discovery_active:
+            return
+            
+        self.discovery_active = True
+        try:
+            self.log("Starting user discovery...")
+            header = pack_header(self.client_id, '\xFF' * 20, ECHO)
+            self.udp_socket.sendto(header, ('<broadcast>', UDP_PORT))
+            self.log("Discovery request sent")
+        except Exception as e:
+            self.log(f"Error sending discovery: {e}")
+        finally:
+            self.discovery_active = False
     
-    def receive_messages(self):
+    def receive_loop(self):
         while self.running:
             try:
                 data, addr = self.udp_socket.recvfrom(1024)
@@ -136,39 +169,46 @@ class ChatClientGUI:
                     user_from, user_to, op_code, body_id, body_length = unpack_header(data)
                     
                     if op_code == MESSAGE and (user_to == self.client_id or user_to == '\xFF' * 20):
-
+                        self.log(f"Message received from {user_from}")
                         response = pack_response(RESPONSE_OK, self.client_id)
                         self.udp_socket.sendto(response, addr)
                         
-                        self.udp_socket.settimeout(5)
-                        body_data, _ = self.udp_socket.recvfrom(1024)
-                        received_id = int.from_bytes(body_data[:8], byteorder='big')
-                        
-                        if received_id == body_id:
-                            message = body_data[8:].decode('utf-8')
-                            self.add_message_to_chat(user_from, message, incoming=True)
+                        try:
+                            body_data, _ = self.udp_socket.recvfrom(1024)
+                            received_id = int.from_bytes(body_data[:8], byteorder='big')
                             
-                            if user_from not in self.discovered_users:
-                                self.discovered_users[user_from] = addr[0]
-                                self.root.after(0, self.update_user_list)
-                            
-                          
-                            response = pack_response(RESPONSE_OK, self.client_id)
-                            self.udp_socket.sendto(response, addr)
-                
+                            if received_id == body_id:
+                                message = body_data[8:].decode('utf-8')
+                                self.root.after(0, lambda: self.add_message_to_chat(
+                                    user_from, message, incoming=True))
+                                
+                                if user_from not in self.discovered_users:
+                                    self.discovered_users[user_from] = addr[0]
+                                    self.root.after(0, self.update_user_list)
+                                
+                                response = pack_response(RESPONSE_OK, self.client_id)
+                                self.udp_socket.sendto(response, addr)
+                        except socket.timeout:
+                            self.log("Timeout waiting for message body")
+                        except Exception as e:
+                            self.log(f"Error processing message: {e}")
+                    
                     elif op_code == ECHO and user_to == '\xFF' * 20:
+                        self.log(f"Discovery request from {user_from}")
                         response = pack_response(RESPONSE_OK, self.client_id)
                         self.udp_socket.sendto(response, addr)
                         
                         if user_from not in self.discovered_users:
                             self.discovered_users[user_from] = addr[0]
                             self.root.after(0, self.update_user_list)
+                            self.log(f"New user discovered: {user_from}")
             
             except socket.timeout:
-                continue
+                continue  
             except Exception as e:
                 if self.running:
-                    print(f"Error receiving: {e}")
+                    self.log(f"Error in receive loop: {e}")
+                    time.sleep(1)  
     
     def send_message_from_ui(self, event=None):
         if not self.current_chat:
@@ -181,7 +221,8 @@ class ChatClientGUI:
             
         def send_task():
             try:
-                body_id = 1  
+                self.log(f"Sending message to {self.current_chat}...")
+                body_id = 1 
                 header = pack_header(
                     self.client_id, 
                     self.current_chat, 
@@ -192,32 +233,39 @@ class ChatClientGUI:
                 self.udp_socket.sendto(header, (self.discovered_users[self.current_chat], UDP_PORT))
 
                 self.udp_socket.settimeout(5)
-                response, _ = self.udp_socket.recvfrom(RESPONSE_SIZE)
-                status, _ = unpack_response(response)
-                
-                if status != RESPONSE_OK:
-                    self.root.after(0, lambda: messagebox.showerror("Error", "Recipient didn't acknowledge"))
-                    return
-                
-                body = body_id.to_bytes(8, byteorder='big') + message.encode('utf-8')
-                self.udp_socket.sendto(body, (self.discovered_users[self.current_chat], UDP_PORT))
+                try:
+                    response, _ = self.udp_socket.recvfrom(RESPONSE_SIZE)
+                    status, _ = unpack_response(response)
+                    
+                    if status != RESPONSE_OK:
+                        self.root.after(0, lambda: messagebox.showerror("Error", "Recipient didn't acknowledge"))
+                        return
 
-                response, _ = self.udp_socket.recvfrom(RESPONSE_SIZE)
-                status, _ = unpack_response(response)
+                    body = body_id.to_bytes(8, byteorder='big') + message.encode('utf-8')
+                    self.udp_socket.sendto(body, (self.discovered_users[self.current_chat], UDP_PORT))
+                    
+                    response, _ = self.udp_socket.recvfrom(RESPONSE_SIZE)
+                    status, _ = unpack_response(response)
+                    
+                    if status == RESPONSE_OK:
+                        self.root.after(0, lambda: self.add_message_to_chat(
+                            self.current_chat, message, incoming=False))
+                        self.root.after(0, lambda: self.message_entry.delete(0, tk.END))
+                        self.log("Message sent successfully")
+                    else:
+                        self.root.after(0, lambda: messagebox.showerror("Error", "Message delivery failed"))
+                        self.log("Message delivery failed")
                 
-                if status == RESPONSE_OK:
-                    self.root.after(0, lambda: self.add_message_to_chat(self.current_chat, message, incoming=False))
-                    self.root.after(0, lambda: self.message_entry.delete(0, tk.END))
-                else:
-                    self.root.after(0, lambda: messagebox.showerror("Error", "Message delivery failed"))
+                except socket.timeout:
+                    self.root.after(0, lambda: messagebox.showerror("Error", "Timeout waiting for response"))
+                    self.log("Timeout waiting for message response")
                 
-            except socket.timeout:
-                self.root.after(0, lambda: messagebox.showerror("Error", "Timeout waiting for response"))
             except Exception as e:
                 self.root.after(0, lambda: messagebox.showerror("Error", f"Failed to send: {str(e)}"))
+                self.log(f"Error sending message: {e}")
             finally:
-                self.udp_socket.settimeout(None)
-        
+                self.udp_socket.settimeout(1)  
+    
         threading.Thread(target=send_task).start()
     
     def send_file_dialog(self):
@@ -231,10 +279,12 @@ class ChatClientGUI:
             
         def send_file_task():
             try:
+                self.log(f"Preparing to send file to {self.current_chat}...")
+                
                 with open(filepath, "rb") as f:
                     file_data = f.read()
                 
-                body_id = 1  
+                body_id =1 
                 header = pack_header(
                     self.client_id, 
                     self.current_chat, 
@@ -243,45 +293,64 @@ class ChatClientGUI:
                     len(file_data))
                 
                 self.udp_socket.sendto(header, (self.discovered_users[self.current_chat], UDP_PORT))
-                
+
                 self.udp_socket.settimeout(5)
-                response, _ = self.udp_socket.recvfrom(RESPONSE_SIZE)
-                status, _ = unpack_response(response)
+                try:
+                    response, _ = self.udp_socket.recvfrom(RESPONSE_SIZE)
+                    status, _ = unpack_response(response)
+                    
+                    if status != RESPONSE_OK:
+                        self.root.after(0, lambda: messagebox.showerror("Error", "Recipient didn't acknowledge"))
+                        return
+                    
+                    self.log("Starting file transfer...")
+                    tcp_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    tcp_sock.settimeout(10)  
+                    
+                    try:
+                        tcp_sock.connect((self.discovered_users[self.current_chat], TCP_PORT))
+                        tcp_sock.sendall(body_id.to_bytes(8, byteorder='big') + file_data)
+                        
+                        response = tcp_sock.recv(RESPONSE_SIZE)
+                        status, _ = unpack_response(response)
+                        
+                        if status == RESPONSE_OK:
+                            filename = os.path.basename(filepath)
+                            self.root.after(0, lambda: self.add_message_to_chat(
+                                self.current_chat, f"Sent file: {filename}", incoming=False))
+                            self.log("File sent successfully")
+                        else:
+                            self.root.after(0, lambda: messagebox.showerror("Error", "File transfer failed"))
+                            self.log("File transfer failed")
+                    
+                    except socket.timeout:
+                        self.root.after(0, lambda: messagebox.showerror("Error", "File transfer timeout"))
+                        self.log("File transfer timeout")
+                    finally:
+                        tcp_sock.close()
                 
-                if status != RESPONSE_OK:
-                    self.root.after(0, lambda: messagebox.showerror("Error", "Recipient didn't acknowledge"))
-                    return
+                except socket.timeout:
+                    self.root.after(0, lambda: messagebox.showerror("Error", "Timeout waiting for file ACK"))
+                    self.log("Timeout waiting for file ACK")
                 
-                tcp_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                tcp_sock.connect((self.discovered_users[self.current_chat], TCP_PORT))
-                
-                tcp_sock.sendall(body_id.to_bytes(8, byteorder='big') + file_data)
-                
-                response = tcp_sock.recv(RESPONSE_SIZE)
-                status, _ = unpack_response(response)
-                
-                if status == RESPONSE_OK:
-                    filename = os.path.basename(filepath)
-                    self.root.after(0, lambda: self.add_message_to_chat(
-                        self.current_chat, f"Sent file: {filename}", incoming=False))
-                else:
-                    self.root.after(0, lambda: messagebox.showerror("Error", "File transfer failed"))
-                
-                tcp_sock.close()
-                
-            except socket.timeout:
-                self.root.after(0, lambda: messagebox.showerror("Error", "Timeout waiting for response"))
             except Exception as e:
                 self.root.after(0, lambda: messagebox.showerror("Error", f"Failed to send file: {str(e)}"))
+                self.log(f"Error sending file: {e}")
             finally:
-                self.udp_socket.settimeout(None)
-        
+                self.udp_socket.settimeout(1)  
+    
         threading.Thread(target=send_file_task).start()
     
     def on_close(self):
+        """Maneja el cierre limpio de la aplicación"""
+        self.log("Closing client...")
         self.running = False
-        self.udp_socket.close()
+        try:
+            self.udp_socket.close()
+        except:
+            pass
         self.root.destroy()
+        sys.exit(0)
 
 if __name__ == "__main__":
     root = tk.Tk()
