@@ -102,7 +102,6 @@ class LCPClientGUI:
             self.udp_socket.sendto(header, ('<broadcast>', UDP_PORT))
             
             try:
-                self.udp_socket.settimeout(3)
                 while True:
                     response, addr = self.udp_socket.recvfrom(RESPONSE_SIZE)
                     status, responder_id = unpack_response(response)
@@ -112,7 +111,6 @@ class LCPClientGUI:
                         self.refresh_user_list()
             except socket.timeout:
                 self.log_message("[DISCOVERY] Discovery completed")
-                self.udp_socket.settimeout(None)
         
         threading.Thread(target=discovery_task).start()
     
@@ -216,7 +214,6 @@ class LCPClientGUI:
                 
                 self.udp_socket.sendto(header, (self.discovered_users[recipient_id], UDP_PORT))
                 
-                self.udp_socket.settimeout(5)
                 response, _ = self.udp_socket.recvfrom(RESPONSE_SIZE)
                 status, _ = unpack_response(response)
                 
@@ -257,7 +254,7 @@ class LCPClientGUI:
                 if len(data) >= HEADER_SIZE:
                     user_from, user_to, op_code, body_id, body_length = unpack_header(data)
                 
-                    if op_code == MESSAGE and (user_to == self.client_id or user_to == '\xFF' * 20):
+                    if op_code == MESSAGE and (user_to == self.client_id or user_to == BROADCAST_ID):
                         response = pack_response(RESPONSE_OK, self.client_id)
                         self.udp_socket.sendto(response, addr)
                         
