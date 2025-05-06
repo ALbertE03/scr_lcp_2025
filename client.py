@@ -4,10 +4,33 @@ import uuid
 import threading
 from datetime import datetime
 import sys
-from network import NetworkManager
+import socket
+import subprocess
+import re
+import platform
+from network import NetworkManager, get_network_info
 from chat_manager import ChatManager
 from file_transfer import FileTransferManager
 import os
+
+
+def get_local_ip():
+    """Obtiene la dirección IP local del dispositivo"""
+    try:
+        # Crea un socket temporal para determinar qué interfaz usaría para conectarse a Internet
+        temp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        temp_socket.connect(("8.8.8.8", 80))
+        local_ip = temp_socket.getsockname()[0]
+        temp_socket.close()
+        return local_ip
+    except:
+        # Si falla, intenta otro método
+        try:
+            hostname = socket.gethostname()
+            local_ip = socket.gethostbyname(hostname)
+            return local_ip
+        except:
+            return "No se pudo determinar"
 
 
 class ChatClientGUI:
@@ -22,6 +45,10 @@ class ChatClientGUI:
         self.file_transfer_manager = FileTransferManager(
             self.client_id, self.network_manager
         )
+
+        self.network_manager.set_chat_manager(self.chat_manager)
+
+        self.current_chat = "GLOBAL"
 
         self.create_widgets()
 
@@ -39,6 +66,8 @@ class ChatClientGUI:
 
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
         self.log("Cliente iniciado. Tu ID: " + self.client_id)
+
+        threading.Thread(target=self.show_connection_info, daemon=True).start()
 
     def log(self, message):
         timestamp = datetime.now().strftime("%H:%M:%S")
@@ -258,14 +287,16 @@ class ChatClientGUI:
         """Manualmente inicia el proceso de descubrimiento para buscar usuarios en la red"""
         self.log("Buscando usuarios en la red...")
         try:
-            # Envía una solicitud de descubrimiento a través del network manager
             threading.Thread(
                 target=self.network_manager.discovery_loop,
                 args=(self.chat_manager,),
                 daemon=True,
             ).start()
-            # Actualiza la lista de usuarios después de un breve retraso
             self.root.after(1000, self.update_users_list)
+            messagebox.showinfo(
+                "Buscando usuarios",
+                "Buscando usuarios en la red. Este proceso puede tardar unos segundos.",
+            )
         except Exception as e:
             self.log(f"Error al buscar usuarios: {str(e)}")
             messagebox.showerror("Error", f"Error al buscar usuarios: {str(e)}")
@@ -293,6 +324,79 @@ class ChatClientGUI:
         self.log(
             f"Lista de chats actualizada: {len(self.chat_manager.chats)} chats activos"
         )
+
+    def show_connection_info(self):
+        """Muestra una ventana con información de conexión útil para conectarse con otros usuarios"""
+        info_window = tk.Toplevel(self.root)
+        info_window.title("Información de Conexión")
+        info_window.geometry("400x200")
+
+        local_ip = get_local_ip()
+        broadcast_addresses = get_network_info()
+
+        frame = ttk.Frame(info_window, padding=10)
+        frame.pack(fill=tk.BOTH, expand=True)
+
+        ttk.Label(
+            frame,
+            text="Información para conectarse con otros usuarios",
+            font=("Helvetica", 15, "bold"),
+        ).pack(pady=(0, 10))
+
+        ttk.Label(
+            frame,
+            text=f"Tu ID de cliente: {self.client_id}",
+            font=("Helvetica", 15),
+        ).pack(anchor="w", pady=2)
+
+        ttk.Label(
+            frame,
+            text=f"Tu dirección IP: {local_ip}",
+            font=("Helvetica", 15),
+        ).pack(anchor="w", pady=2)
+
+        ttk.Label(
+            frame,
+            text=f"Puerto UDP: 9990",
+            font=("Helvetica", 15),
+        ).pack(anchor="w", pady=2)
+
+        ttk.Label(
+            frame,
+            text="Direcciones de broadcast detectadas:",
+            font=("Helvetica", 15),
+        ).pack(anchor="w", pady=2)
+
+        broadcast_text = tk.Text(frame, height=5, width=40)
+        broadcast_text.pack(fill=tk.X, pady=5)
+        for addr in broadcast_addresses:
+            broadcast_text.insert(tk.END, f"{addr}\n")
+        broadcast_text.config(state="disabled")
+
+    def show_network_details(self):
+        """Muestra información detallada de la red"""
+        try:
+            if platform.system() == "Darwin":
+                output = subprocess.check_output(
+                    ["ifconfig", "en0"], universal_newlines=True
+                )
+
+            details_window = tk.Toplevel(self.root)
+            details_window.title("Detalles de red")
+            details_window.geometry("600x400")
+
+            text_widget = scrolledtext.ScrolledText(details_window)
+            text_widget.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+            text_widget.insert(tk.END, output)
+            text_widget.config(state="disabled")
+
+            ttk.Button(
+                details_window,
+                text="Cerrar",
+                command=details_window.destroy,
+            ).pack(pady=10)
+        except Exception as e:
+            messagebox.showerror("Error", f"No se pudo obtener información de red: {e}")
 
 
 if __name__ == "__main__":
