@@ -3,6 +3,7 @@ import threading
 import subprocess
 import re
 import platform
+import time
 from protocol import (
     pack_header,
     unpack_header,
@@ -10,7 +11,10 @@ from protocol import (
     unpack_response,
     BROADCAST_ID,
     UDP_PORT,
+    TCP_PORT,
     RESPONSE_OK,
+    RESPONSE_BAD_REQUEST,
+    RESPONSE_INTERNAL_ERROR,
     MESSAGE,
     ECHO,
     FILE,
@@ -19,7 +23,7 @@ from protocol import (
 
 
 def get_network_info():
-    """Obtiene información de red sin dependencias externas"""
+    """Obtiene información de red"""
     system = platform.system()
     broadcast_addresses = []
 
@@ -27,7 +31,6 @@ def get_network_info():
         if system == "Darwin":
             output = subprocess.check_output(["ifconfig"], universal_newlines=True)
             interfaces = re.split(r"\n(?=\w)", output)
-
             for interface in interfaces:
                 if (
                     "status: active" in interface
@@ -67,13 +70,78 @@ def get_network_info():
     return broadcast_addresses
 
 
+def get_mac_address():
+    """Obtiene la dirección MAC del primer adaptador de red activo"""
+    try:
+        system = platform.system()
+        if system == "Darwin":
+            output = subprocess.check_output(["ifconfig"], universal_newlines=True)
+            interfaces = re.split(r"\n(?=\w)", output)
+            for interface in interfaces:
+                if "status: active" in interface and "ether " in interface:
+                    mac_match = re.search(r"ether (\S+)", interface)
+                    if mac_match:
+                        mac = mac_match.group(1).replace(":", "").lower()
+                        print(f"MAC detectada en macOS: {mac}")
+                        return mac
+        elif system == "Linux":
+            output = subprocess.check_output(["ip", "link"], universal_newlines=True)
+            for line in output.splitlines():
+                if "link/ether" in line:
+                    mac_match = re.search(r"link/ether (\S+)", line)
+                    if mac_match:
+                        mac = mac_match.group(1).replace(":", "").lower()
+                        print(f"MAC detectada en Linux: {mac}")
+                        return mac
+        elif system == "Windows":
+            output = subprocess.check_output(["getmac"], universal_newlines=True)
+            if output:
+                mac_match = re.search(r"([0-9A-F]{2}[-]){5}([0-9A-F]{2})", output)
+                if mac_match:
+                    mac = mac_match.group(0).replace("-", "").lower()
+                    print(f"MAC detectada en Windows: {mac}")
+                    return mac
+
+        import random
+        import uuid
+
+        try:
+            mac = ":".join(
+                [
+                    "{:02x}".format((uuid.getnode() >> elements) & 0xFF)
+                    for elements in range(0, 8 * 6, 8)
+                ][::-1]
+            )
+            mac = mac.replace(":", "")
+            print(f"MAC obtenida mediante uuid: {mac}")
+            return mac
+        except:
+            rand_id = f"user_{random.randint(1000, 9999)}"
+            print(f"Generando ID aleatorio: {rand_id}")
+            return rand_id
+
+    except Exception as e:
+        print(f"Error obteniendo dirección MAC: {e}")
+        import random
+
+        rand_id = f"user_{random.randint(1000, 9999)}"
+        print(f"Error, generando ID aleatorio: {rand_id}")
+        return rand_id
+
+
 class NetworkManager:
-    def __init__(self, client_id):
-        self.client_id = client_id
+    def __init__(self, client_id=None):
+        if client_id is None:
+            self.client_id = get_mac_address()
+            self.client_id = self.client_id[:20]
+            print(f"Usando dirección MAC como ID: {self.client_id}")
+        else:
+            self.client_id = client_id[:20]
+
         self.udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.udp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
         self.udp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self.udp_socket.settimeout(0.5)
+        self.udp_socket.settimeout(5.0)
 
         self.broadcast_addresses = get_network_info()
         print(f"Direcciones de broadcast disponibles: {self.broadcast_addresses}")
@@ -81,8 +149,15 @@ class NetworkManager:
         try:
             self.udp_socket.bind(("0.0.0.0", UDP_PORT))
         except Exception as e:
-            print(f"Error al vincular el socket: {e}")
+            print(f"Error al vincular el socket UDP: {e}")
             self.udp_socket.bind(("127.0.0.1", UDP_PORT))
+
+        self.tcp_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            self.tcp_socket.bind(("0.0.0.0", TCP_PORT))
+            self.tcp_socket.listen(5)
+        except Exception as e:
+            print(f"Error al vincular el socket TCP: {e}")
 
         self.running = True
         self.chat_manager = None
@@ -105,15 +180,19 @@ class NetworkManager:
                 success = False
                 for broadcast_addr in self.broadcast_addresses:
                     try:
+                        print(f"Intentando enviar ECHO a {broadcast_addr}:{UDP_PORT}")
                         self.udp_socket.sendto(header, (broadcast_addr, UDP_PORT))
                         success = True
-                        print(f"Broadcast enviado a {broadcast_addr}")
+                        print(f"ECHO enviado exitosamente a {broadcast_addr}")
                     except Exception as e:
                         print(f"Error enviando a {broadcast_addr}: {e}")
 
                 if not success:
-                    self.udp_socket.sendto(header, ("127.0.0.1", UDP_PORT))
-                    print("Broadcast enviado a localhost (127.0.0.1)")
+                    try:
+                        self.udp_socket.sendto(header, ("127.0.0.1", UDP_PORT))
+                        print("ECHO enviado a localhost")
+                    except Exception as e:
+                        print(f"Error enviando a localhost: {e}")
 
                 threading.Event().wait(10)
             except Exception as e:
@@ -129,7 +208,35 @@ class NetworkManager:
                 data, addr = self.udp_socket.recvfrom(1024)
                 print(f"Datos recibidos de {addr}, longitud: {len(data)}")
 
-                if len(data) >= HEADER_SIZE:
+                if len(data) == 25:
+                    try:
+                        try:
+                            status, sender_id = unpack_response(data)
+                            print(
+                                f"Respuesta recibida: status={status}, from={sender_id}"
+                            )
+                        except Exception as e:
+                            response = pack_response(
+                                RESPONSE_BAD_REQUEST, self.client_id
+                            )
+                            self.udp_socket.sendto(response, addr)
+                            print(f"Error al unpackear respuesta: {e}")
+                            continue
+                        if status == RESPONSE_OK:
+                            sender_id_str = sender_id.strip("\x00")
+                            chat_manager.add_user(sender_id_str, addr[0])
+                            print(
+                                f"Usuario añadido desde respuesta: {sender_id_str} en {addr[0]}"
+                            )
+                        continue
+                    except Exception as e:
+                        response = pack_response(
+                            RESPONSE_INTERNAL_ERROR, self.client_id
+                        )
+                        self.udp_socket.sendto(response, addr)
+                        print(f"Error al procesar respuesta: {e}")
+
+                if len(data) == HEADER_SIZE:
                     user_from, user_to, op_code, body_id, body_length = unpack_header(
                         data
                     )
@@ -137,19 +244,26 @@ class NetworkManager:
                         f"Header recibido: from={user_from}, to={user_to}, op={op_code}"
                     )
 
-                    is_for_us = (
-                        user_to == self.client_id
-                        or user_to == BROADCAST_ID.decode("utf-8").rstrip("\x00")
-                    )
+                    user_from = user_from.rstrip("\x00")
+                    user_to = user_to.rstrip("\x00")
+                    broadcast_id = BROADCAST_ID.decode("utf-8").rstrip("\x00")
+
+                    is_for_us = user_to == self.client_id or user_to == broadcast_id
 
                     if op_code == ECHO:
+                        print(f"ECHO recibido de {user_from}")
                         response = pack_response(RESPONSE_OK, self.client_id)
                         self.udp_socket.sendto(response, addr)
                         chat_manager.add_user(user_from, addr[0])
                         print(
                             f"Usuario descubierto y guardado: {user_from} en {addr[0]}"
                         )
+
                     elif op_code == MESSAGE and is_for_us:
+                        response = pack_response(RESPONSE_OK, self.client_id)
+                        self.udp_socket.sendto(response, addr)
+
+                        # Fase 2: Esperar el cuerpo del mensaje
                         chat_manager.handle_message(
                             user_from,
                             user_to,
@@ -159,9 +273,15 @@ class NetworkManager:
                             self.udp_socket,
                         )
                     elif op_code == FILE and is_for_us:
+                        # Responder al header de archivo con OK para iniciar transferencia TCP
+                        response = pack_response(RESPONSE_OK, self.client_id)
+                        self.udp_socket.sendto(response, addr)
+
+                        # Delegar la transferencia del archivo al gestor correspondiente
                         file_transfer_manager.handle_file_transfer(
                             user_from, user_to, body_id, body_length, addr
                         )
+
             except socket.timeout:
                 continue
             except Exception as e:
@@ -170,6 +290,7 @@ class NetworkManager:
     def close(self):
         self.running = False
         self.udp_socket.close()
+        self.tcp_socket.close()
 
     def send_message(self, user_to, message_text):
         """Envía un mensaje a un usuario específico o al broadcast"""
@@ -178,15 +299,17 @@ class NetworkManager:
                 print("Error: chat_manager no configurado")
                 return False
 
+            message_bytes = message_text.encode("utf-8")
+            body_id = int(time.time() % 256)
+            body_length = len(message_bytes)
+
             if user_to == "GLOBAL":
                 target_id = BROADCAST_ID
-
                 success = False
+
                 for broadcast_addr in self.broadcast_addresses:
                     try:
                         target_address = (broadcast_addr, UDP_PORT)
-                        body_id = 0
-                        body_length = len(message_text.encode("utf-8"))
 
                         header = pack_header(
                             self.client_id.encode("utf-8"),
@@ -195,29 +318,42 @@ class NetworkManager:
                             body_id,
                             body_length,
                         )
-
-                        print(
-                            f"Enviando mensaje global a {target_address}, header size: {len(header)}"
-                        )
+                        print(f"Enviando header de mensaje global a {target_address}")
                         self.udp_socket.sendto(header, target_address)
-                        self.udp_socket.sendto(
-                            message_text.encode("utf-8"), target_address
-                        )
-                        success = True
+
+                        try:
+                            self.udp_socket.settimeout(5.0)
+                            data, resp_addr = self.udp_socket.recvfrom(25)
+                            status, resp_id = unpack_response(data)
+
+                            if status == RESPONSE_OK:
+                                message_with_id = (
+                                    body_id.to_bytes(8, byteorder="big") + message_bytes
+                                )
+                                self.udp_socket.sendto(message_with_id, target_address)
+                                success = True
+                                print(
+                                    f"Mensaje enviado correctamente a {broadcast_addr}"
+                                )
+                        except socket.timeout:
+                            print(f"Timeout esperando respuesta de {broadcast_addr}")
                     except Exception as e:
                         print(f"Error enviando a {broadcast_addr}: {e}")
 
                 return success
             else:
+                # Mensaje a usuario específico
                 target_id = user_to.encode("utf-8")
                 if user_to not in self.chat_manager.discovered_users:
                     print(f"Usuario desconocido: {user_to}")
                     return False
 
-                target_address = (self.chat_manager.discovered_users[user_to], UDP_PORT)
-                body_id = 0
-                body_length = len(message_text.encode("utf-8"))
+                target_address = (
+                    self.chat_manager.discovered_users[user_to],
+                    UDP_PORT,
+                )
 
+                # Fase 1: Enviar header según protocolo LCP
                 header = pack_header(
                     self.client_id.encode("utf-8"),
                     target_id,
@@ -226,12 +362,28 @@ class NetworkManager:
                     body_length,
                 )
 
-                print(
-                    f"Enviando mensaje a {target_address}, header size: {len(header)}"
-                )
+                print(f"Enviando header de mensaje a {target_address}")
                 self.udp_socket.sendto(header, target_address)
-                self.udp_socket.sendto(message_text.encode("utf-8"), target_address)
-                return True
+
+                # Según protocolo: esperar respuesta antes de enviar cuerpo
+                try:
+                    self.udp_socket.settimeout(5.0)  # Timeout según protocolo
+                    data, resp_addr = self.udp_socket.recvfrom(25)
+                    status, resp_id = unpack_response(data)
+
+                    if status == RESPONSE_OK:
+                        # Fase 2: Enviar cuerpo del mensaje con los 8 bytes de ID primero
+                        message_with_id = (
+                            body_id.to_bytes(8, byteorder="big") + message_bytes
+                        )
+                        self.udp_socket.sendto(message_with_id, target_address)
+                        return True
+                    else:
+                        print(f"Error de respuesta: status={status}")
+                        return False
+                except socket.timeout:
+                    print(f"Timeout esperando respuesta de {user_to}")
+                    return False
 
         except Exception as e:
             print(f"Error enviando mensaje: {e}")

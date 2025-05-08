@@ -6,9 +6,12 @@ from datetime import datetime
 import sys
 import socket
 import subprocess
-import re
 import platform
-from network import NetworkManager, get_network_info
+from network import (
+    NetworkManager,
+    get_network_info,
+    get_mac_address,
+)
 from chat_manager import ChatManager
 from file_transfer import FileTransferManager
 import os
@@ -17,14 +20,12 @@ import os
 def get_local_ip():
     """Obtiene la dirección IP local del dispositivo"""
     try:
-        # Crea un socket temporal para determinar qué interfaz usaría para conectarse a Internet
         temp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         temp_socket.connect(("8.8.8.8", 80))
         local_ip = temp_socket.getsockname()[0]
         temp_socket.close()
         return local_ip
     except:
-        # Si falla, intenta otro método
         try:
             hostname = socket.gethostname()
             local_ip = socket.gethostbyname(hostname)
@@ -39,7 +40,38 @@ class ChatClientGUI:
         self.root.title("Chat LAN")
         self.root.geometry("1000x700")
 
-        self.client_id = str(uuid.uuid4()).replace("-", "")[:20]
+        mac_address = get_mac_address()
+
+        mac_bytes = mac_address.encode("utf-8")
+
+        if len(mac_bytes) < 20:
+            padding = 20 - len(mac_bytes)
+            mac_address = mac_address + "0" * padding
+            mac_bytes = mac_address.encode("utf-8")
+
+            while len(mac_bytes) > 20:
+                mac_address = mac_address[:-1]
+                mac_bytes = mac_address.encode("utf-8")
+
+            while len(mac_bytes) < 20:
+                mac_address = mac_address + "0"
+                mac_bytes = mac_address.encode("utf-8")
+
+        elif len(mac_bytes) > 20:
+            while len(mac_bytes) > 20:
+                mac_address = mac_address[:-1]
+                mac_bytes = mac_address.encode("utf-8")
+
+        self.client_id = mac_address
+        self.log(
+            f"ID de cliente configurado: {self.client_id} (longitud en bytes: {len(self.client_id.encode('utf-8'))})"
+        )
+
+        # Verificación adicional - debe ser exactamente 20 bytes
+        assert (
+            len(self.client_id.encode("utf-8")) == 20
+        ), "El ID de cliente debe ser exactamente 20 bytes"
+
         self.network_manager = NetworkManager(self.client_id)
         self.chat_manager = ChatManager(self.client_id)
         self.file_transfer_manager = FileTransferManager(
@@ -367,7 +399,7 @@ class ChatClientGUI:
             font=("Helvetica", 15),
         ).pack(anchor="w", pady=2)
 
-        broadcast_text = tk.Text(frame, height=5, width=40)
+        broadcast_text = tk.Text(frame, height=5, width=40, font=("Helvetica", 15))
         broadcast_text.pack(fill=tk.X, pady=5)
         for addr in broadcast_addresses:
             broadcast_text.insert(tk.END, f"{addr}\n")

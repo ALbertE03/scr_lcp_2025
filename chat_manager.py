@@ -19,7 +19,6 @@ class ChatManager:
         if user_to == self.client_id or user_to == BROADCAST_ID.decode("utf-8"):
             udp_socket.sendto(pack_response(RESPONSE_OK, self.client_id), addr)
             print(f"Mensaje recibido de {user_from}: {body_length} bytes")
-            # Registro del mensaje en el historial
             self.add_message_to_chat(user_from, f"{body_length} bytes recibidos")
 
     def get_chat(self, user_id):
