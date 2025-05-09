@@ -1,6 +1,7 @@
 import struct
 import uuid
 
+
 UDP_PORT = 9990
 TCP_PORT = 9990
 
@@ -25,6 +26,7 @@ RESPONSE_BAD_REQUEST = 1
 RESPONSE_INTERNAL_ERROR = 2
 
 SERVER_USER_ID = str(uuid.uuid4()).replace("-", "")[:20]
+LOG_FILE = "Logs/lcp.log"
 
 
 def pack_header(user_from, user_to, op_code, body_id=0, body_length=0):
