@@ -6,10 +6,12 @@ import os
 from protocol import *
 from main import LCPPeer
 import logging
+import concurrent.futures
+import queue
+from utils.system_info import get_optimal_thread_count
 
-# Configurar logging
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.WARNING,
     format="%(asctime)s [%(threadName)s] [%(levelname)s] %(message)s",
     datefmt="%H:%M:%S",
 )
@@ -20,50 +22,56 @@ class LCPChat(tk.Tk):
     def __init__(self):
         super().__init__()
 
-        # Configuración de la ventana principal
         self.title("LCP Chat")
         self.geometry("800x600")
         self.minsize(600, 400)
 
-        # Configurar estilo para botones más visibles
         self.style = ttk.Style()
         self.style.configure("TButton", font=("Arial", 11), padding=6)
 
-        # Solicitar nombre de usuario al iniciar
+        n, _, _ = get_optimal_thread_count()
+        print(n)
+        self.thread_pool = concurrent.futures.ThreadPoolExecutor(
+            max_workers=n, thread_name_prefix="GUI-Worker"
+        )
+
+        self.update_queue = queue.Queue()
+
         username = self.get_username()
 
-        # Inicializar el peer LCP
         self.peer = LCPPeer(username)
 
-        # Registrar los callbacks para eventos LCP
         self.peer.register_message_callback(self.on_message)
         self.peer.register_file_callback(self.on_file)
         self.peer.register_peer_discovery_callback(self.on_peer_change)
         self.peer.register_file_progress_callback(self.on_file_progress)
 
-        # Variables para la interfaz
         self.current_chat = None
-        self.chat_history = {}  # {user_id: [mensajes]}
+        self.chat_history = {}
         self.selected_user = tk.StringVar()
 
-        # Crear interfaz
         self.create_widgets()
 
-        # Actualizar periódicamente la lista de usuarios
         self.after(1000, self.update_ui)
 
-        # Mostrar mensaje de bienvenida
+        self.after(100, self.process_ui_updates)
+
         self.append_to_chat("Sistema", f"Bienvenido {username}!")
         self.append_to_chat(
             "Sistema", "Esperando descubrir otros usuarios en la red..."
         )
+
+    def __del__(self):
+        """Destructor para liberar recursos"""
+        if hasattr(self, "thread_pool"):
+            self.thread_pool.shutdown(wait=False)
 
     def get_username(self):
         """Solicita un nombre de usuario al iniciar la aplicación"""
         username = simpledialog.askstring(
             "LCP Chat",
             "Introduce tu nombre de usuario:",
-            initialvalue=f"User{int(time.time())%1000}",
+            initialvalue=f"Albert",
         )
         if not username:
             username = f"User{int(time.time())%1000}"
@@ -71,25 +79,20 @@ class LCPChat(tk.Tk):
 
     def create_widgets(self):
         """Crea los widgets de la interfaz"""
-        # Crear frame principal con divisores
         main_paned = ttk.PanedWindow(self, orient=tk.HORIZONTAL)
         main_paned.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
 
-        # Frame para lista de usuarios (izquierda)
         users_frame = ttk.Frame(main_paned, width=200)
         main_paned.add(users_frame, weight=1)
 
-        # Frame para chat (derecha)
         chat_frame = ttk.Frame(main_paned)
         main_paned.add(chat_frame, weight=3)
 
-        # Configurar frame de usuarios
         users_label = ttk.Label(
             users_frame, text="Usuarios Conectados", font=("Arial", 12, "bold")
         )
         users_label.pack(pady=5)
 
-        # Lista de usuarios
         self.users_list = tk.Listbox(
             users_frame,
             listvariable=self.selected_user,
@@ -100,7 +103,6 @@ class LCPChat(tk.Tk):
         self.users_list.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
         self.users_list.bind("<<ListboxSelect>>", self.on_user_select)
 
-        # Botón de actualizar usuarios - Usar tk Button nativo con colores claros de fácil visualización
         refresh_btn = tk.Button(
             users_frame,
             text="Actualizar",
@@ -113,12 +115,9 @@ class LCPChat(tk.Tk):
         )
         refresh_btn.pack(fill=tk.X, padx=5, pady=5)
 
-        # Configurar frame de chat
-        # Frame superior para mostrar mensajes
         chat_history_frame = ttk.Frame(chat_frame)
         chat_history_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
 
-        # Área de texto para mostrar mensajes
         self.chat_display = scrolledtext.ScrolledText(
             chat_history_frame,
             wrap=tk.WORD,
@@ -128,21 +127,16 @@ class LCPChat(tk.Tk):
         )
         self.chat_display.pack(fill=tk.BOTH, expand=True)
 
-        # Frame inferior para entrada de mensajes
         input_frame = ttk.Frame(chat_frame)
         input_frame.pack(fill=tk.X, padx=5, pady=5)
 
-        # Campo de entrada de texto
         self.message_input = ttk.Entry(input_frame, font=("Arial", 11))
         self.message_input.pack(fill=tk.X, side=tk.LEFT, expand=True, padx=(0, 5))
         self.message_input.bind("<Return>", self.send_message)
 
-        # Frame para botones
         buttons_frame = ttk.Frame(chat_frame)
         buttons_frame.pack(fill=tk.X, pady=5)
 
-        # Botones con colores contrastantes que aseguren visibilidad
-        # Botón verde con texto negro
         send_btn = tk.Button(
             buttons_frame,
             text="Enviar",
@@ -155,7 +149,18 @@ class LCPChat(tk.Tk):
         )
         send_btn.pack(side=tk.LEFT, padx=5)
 
-        # Botón azul con texto negro
+        broadcast_btn = tk.Button(
+            buttons_frame,
+            text="Enviar a Todos",
+            command=self.send_broadcast,
+            bg="#FF9800",
+            fg="black",
+            font=("Arial", 11),
+            padx=15,
+            pady=5,
+        )
+        broadcast_btn.pack(side=tk.LEFT, padx=5)
+
         file_btn = tk.Button(
             buttons_frame,
             text="Enviar Archivo",
@@ -168,7 +173,6 @@ class LCPChat(tk.Tk):
         )
         file_btn.pack(side=tk.LEFT, padx=5)
 
-        # Barra de estado
         self.status_var = tk.StringVar()
         self.status_var.set("Listo")
         status_bar = ttk.Label(
@@ -182,34 +186,36 @@ class LCPChat(tk.Tk):
 
     def update_ui(self):
         """Actualiza periódicamente la interfaz"""
-        self.refresh_users()
-        self.after(2000, self.update_ui)  # Actualizar cada 2 segundos
+        current_peers = set(self.peer.get_peers())
+        if hasattr(self, "_last_peers"):
+            if current_peers != self._last_peers:
+                self.refresh_users()
+        else:
+            self.refresh_users()
+
+        self._last_peers = current_peers
+        self.after(5000, self.update_ui)
 
     def refresh_users(self):
         """Actualiza la lista de usuarios conectados"""
         peers = self.peer.get_peers()
 
-        # Guardar la selección actual
         current_selection = None
         if self.users_list.curselection():
             current_selection = self.users_list.get(self.users_list.curselection()[0])
 
-        # Actualizar la lista
         self.users_list.delete(0, tk.END)
         for peer_id in peers:
             self.users_list.insert(tk.END, peer_id)
 
-        # Si había una selección, intentar mantenerla
         if current_selection:
             try:
                 idx = peers.index(current_selection)
                 self.users_list.selection_set(idx)
                 self.users_list.see(idx)
             except ValueError:
-                # El usuario seleccionado ya no está disponible
                 self.current_chat = None
 
-        # Actualizar contador en la barra de estado
         self.status_var.set(f"Conectados: {len(peers)} usuarios")
 
     def on_user_select(self, event):
@@ -220,42 +226,33 @@ class LCPChat(tk.Tk):
         selected_idx = self.users_list.curselection()[0]
         selected_user = self.users_list.get(selected_idx)
 
-        # Cambiar el chat activo
         self.current_chat = selected_user
 
-        # Mostrar el historial de este usuario
         self.display_chat_history(selected_user)
 
     def display_chat_history(self, user_id):
         """Muestra el historial de chat con un usuario"""
-        # Limpiar el área de chat
         self.chat_display.configure(state="normal")
         self.chat_display.delete(1.0, tk.END)
 
-        # Mostrar historial si existe
         if user_id in self.chat_history:
             for msg in self.chat_history[user_id]:
                 self.chat_display.insert(tk.END, f"{msg}\n")
 
         self.chat_display.configure(state="disabled")
 
-        # Hacer scroll al final
         self.chat_display.see(tk.END)
 
     def append_to_chat(self, user_id, message):
         """Añade un mensaje al historial y lo muestra si es el chat actual"""
-        # Formatear mensaje
         timestamp = time.strftime("%H:%M:%S")
         formatted_msg = f"[{timestamp}] {user_id}: {message}"
 
-        # Guardar en historial
         if user_id not in self.chat_history:
             self.chat_history[user_id] = []
 
-        # Añadir al historial
         self.chat_history[user_id].append(formatted_msg)
 
-        # Si es el chat actual, mostrar
         if self.current_chat == user_id or user_id == "Sistema":
             self.chat_display.configure(state="normal")
             self.chat_display.insert(tk.END, f"{formatted_msg}\n")
@@ -274,16 +271,106 @@ class LCPChat(tk.Tk):
         if not message:
             return
 
-        # Enviar el mensaje
-        success = self.peer.send_message(self.current_chat, message)
+        current_chat = self.current_chat
+        self.message_input.delete(0, tk.END)
 
-        if success:
-            # Añadir a nuestro propio historial
-            self.append_to_chat("Tú", message)
-            self.message_input.delete(0, tk.END)
-        else:
-            self.append_to_chat(
-                "Sistema", f"Error enviando mensaje a {self.current_chat}."
+        self.status_var.set(f"Enviando mensaje a {current_chat}...")
+
+        self.thread_pool.submit(self._send_message_thread, current_chat, message)
+
+    def _send_message_thread(self, user_to, message):
+        """Ejecuta el envío de mensajes en un hilo separado"""
+        try:
+            success = self.peer.send_message(user_to, message)
+
+            if success:
+                self.update_queue.put(lambda: self.append_to_chat("Tú", message))
+                self.update_queue.put(
+                    lambda: self.status_var.set("Mensaje enviado correctamente")
+                )
+            else:
+                self.update_queue.put(
+                    lambda: self.append_to_chat(
+                        "Sistema", f"Error enviando mensaje a {user_to}."
+                    )
+                )
+                self.update_queue.put(
+                    lambda: self.status_var.set("Error al enviar mensaje")
+                )
+
+        except Exception as e:
+            logger.error(f"Error enviando mensaje: {e}")
+            self.update_queue.put(
+                lambda: self.append_to_chat(
+                    "Sistema", f"Error enviando mensaje: {str(e)}"
+                )
+            )
+            self.update_queue.put(
+                lambda: self.status_var.set("Error al enviar mensaje")
+            )
+
+    def send_broadcast(self):
+        """Envía un mensaje a todos los usuarios conectados a la vez con una única transmisión"""
+        message = self.message_input.get().strip()
+        if not message:
+            return
+
+        self.message_input.delete(0, tk.END)
+
+        timestamp = time.strftime("%H:%M:%S")
+        broadcast_msg = f"[{timestamp}] Tú (Broadcast): {message}"
+
+        if "Broadcast" not in self.chat_history:
+            self.chat_history["Broadcast"] = []
+        self.chat_history["Broadcast"].append(broadcast_msg)
+
+        if self.current_chat == "Broadcast" or self.current_chat == "Sistema":
+            self.chat_display.configure(state="normal")
+            self.chat_display.insert(tk.END, f"{broadcast_msg}\n")
+            self.chat_display.configure(state="disabled")
+            self.chat_display.see(tk.END)
+
+        self.status_var.set("Enviando mensaje broadcast...")
+
+        self.append_to_chat("Sistema", f'Enviando a todos: "{message}"')
+
+        self.thread_pool.submit(self._send_broadcast_thread, message)
+
+    def _send_broadcast_thread(self, message):
+        """Ejecuta el envío de mensajes broadcast en un hilo separado"""
+        try:
+            success = self.peer.broadcast_message(message)
+
+            if success:
+                self.update_queue.put(
+                    lambda: self.status_var.set(
+                        "Mensaje broadcast enviado correctamente"
+                    )
+                )
+                self.update_queue.put(
+                    lambda: self.append_to_chat(
+                        "Sistema", "✓ Mensaje enviado a todos los usuarios"
+                    )
+                )
+            else:
+                self.update_queue.put(
+                    lambda: self.append_to_chat(
+                        "Sistema", "❌ Error enviando mensaje broadcast"
+                    )
+                )
+                self.update_queue.put(
+                    lambda: self.status_var.set("Error al enviar mensaje broadcast")
+                )
+
+        except Exception as e:
+            logger.error(f"Error enviando mensaje broadcast: {e}")
+            self.update_queue.put(
+                lambda: self.append_to_chat(
+                    "Sistema", f"❌ Error enviando mensaje broadcast: {str(e)}"
+                )
+            )
+            self.update_queue.put(
+                lambda: self.status_var.set("Error al enviar mensaje broadcast")
             )
 
     def send_file(self):
@@ -294,34 +381,56 @@ class LCPChat(tk.Tk):
             )
             return
 
-        # Abrir diálogo para seleccionar archivo
         filepath = filedialog.askopenfilename(title="Selecciona un archivo para enviar")
         if not filepath:
             return
 
-        # Intentar enviar el archivo
-        success = self.peer.send_file(self.current_chat, filepath)
+        current_chat = self.current_chat
+        filename = os.path.basename(filepath)
 
-        if success:
+        self.status_var.set(f"Preparando envío de archivo a {current_chat}...")
+
+        self.thread_pool.submit(self._send_file_thread, current_chat, filepath)
+
+    def _send_file_thread(self, user_to, filepath):
+        """Ejecuta el envío de archivos en un hilo separado"""
+        try:
             filename = os.path.basename(filepath)
-            self.append_to_chat(
-                "Sistema",
-                f"Iniciando envío de archivo: {filename} a {self.current_chat}",
-            )
-        else:
-            self.append_to_chat(
-                "Sistema", f"Error enviando archivo a {self.current_chat}."
+            self.update_queue.put(
+                lambda: self.append_to_chat(
+                    "Sistema", f"Iniciando envío de archivo: {filename} a {user_to}"
+                )
             )
 
-    # Callbacks para eventos LCP
+            success = self.peer.send_file(user_to, filepath)
+
+            if not success:
+                self.update_queue.put(
+                    lambda: self.append_to_chat(
+                        "Sistema", f"Error al iniciar el envío de archivo a {user_to}."
+                    )
+                )
+                self.update_queue.put(
+                    lambda: self.status_var.set("Error al enviar archivo")
+                )
+
+        except Exception as e:
+            logger.error(f"Error enviando archivo: {e}")
+            self.update_queue.put(
+                lambda: self.append_to_chat(
+                    "Sistema", f"Error al enviar archivo: {str(e)}"
+                )
+            )
+            self.update_queue.put(
+                lambda: self.status_var.set("Error al enviar archivo")
+            )
+
     def on_message(self, user_from, message):
         """Callback para mensajes recibidos"""
-        # Mostrar en la interfaz
         self.append_to_chat(user_from, message)
 
     def on_file(self, user_from, file_path):
         """Callback para archivos recibidos"""
-        # Notificar sobre recepción de archivo
         filename = os.path.basename(file_path)
         self.append_to_chat("Sistema", f"Archivo recibido de {user_from}: {filename}")
         self.append_to_chat("Sistema", f"Guardado como: {file_path}")
@@ -341,7 +450,7 @@ class LCPChat(tk.Tk):
                 "Sistema", f"Iniciando envío de '{filename}' a {user_id}"
             )
         elif status == "progreso":
-            if progress % 20 == 0:  # Actualizar cada 20%
+            if progress % 20 == 0:
                 self.status_var.set(
                     f"Enviando '{filename}' a {user_id}: {progress}% completado"
                 )
@@ -355,6 +464,19 @@ class LCPChat(tk.Tk):
                 "Sistema", f"Error enviando archivo '{filename}' a {user_id}"
             )
             self.status_var.set("Error en la transferencia")
+
+    def process_ui_updates(self):
+        """Procesa las actualizaciones de la interfaz de usuario desde la cola"""
+        processed = 0
+        while not self.update_queue.empty() and processed < 10:
+            try:
+                update_func = self.update_queue.get_nowait()
+                update_func()
+                processed += 1
+            except queue.Empty:
+                break
+        next_interval = 100 if self.update_queue.qsize() > 5 else 500
+        self.after(next_interval, self.process_ui_updates)
 
 
 if __name__ == "__main__":

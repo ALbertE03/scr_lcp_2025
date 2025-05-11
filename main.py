@@ -12,7 +12,7 @@ from utils.network_utils import *
 from utils.system_info import *
 
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.WARNING,
     format="%(asctime)s [%(threadName)s] [%(levelname)s] %(message)s",
     datefmt="%H:%M:%S",
 )
@@ -1282,7 +1282,6 @@ class LCPPeer:
                                 logger.info(
                                     f"{worker_name} Progreso: {bytes_enviados/1024:.1f} KB ({progress}%) enviados a {user_to}"
                                 )
-
                                 # Notificar a los callbacks de progreso
                                 with self._callback_lock:
                                     for callback in self.file_progress_callbacks:
@@ -1325,6 +1324,85 @@ class LCPPeer:
         finally:
             self.udp_socket.settimeout(None)
             logger.debug(f"{worker_name} Socket UDP restaurado a modo no bloqueante")
+
+    def broadcast_message(self, message):
+        """Envía un mensaje a todos los peers con una única transmisión.
+        Esto implementa la funcionalidad de mensajería uno-a-muchos.
+
+        Args:
+            message: Mensaje a enviar a todos los peers
+
+        Returns:
+            bool: True si el mensaje fue enviado, False en caso de error
+        """
+        logger.info(f"Iniciando envío de mensaje broadcast: {message[:50]}...")
+
+        message_id = int(time.time() * 1000) % 256  # BodyId único
+        message_bytes = message.encode("utf-8")
+
+        logger.info(
+            f"Enviando broadcast (message_id: {message_id}, tamaño: {len(message_bytes)} bytes)"
+        )
+
+        try:
+            # Fase 1: Enviar header con destino broadcast
+            header = self._build_header(None, MESSAGE, message_id, len(message_bytes))
+            logger.info("FASE 1: Enviando header LCP broadcast")
+
+            # Enviamos a todas las interfaces de broadcast
+            broadcast_addresses = get_network_info()
+            success = False
+
+            with self._udp_socket_lock:
+                for broadcast_addr in broadcast_addresses:
+                    try:
+                        self.udp_socket.sendto(header, (broadcast_addr, UDP_PORT))
+                        logger.info(
+                            f"Header broadcast enviado a {broadcast_addr}:{UDP_PORT}"
+                        )
+                        success = True
+                    except Exception as e:
+                        logger.error(f"Error enviando header a {broadcast_addr}: {e}")
+
+                if not success:
+                    logger.error(
+                        "No se pudo enviar el header a ninguna dirección de broadcast"
+                    )
+                    return False
+
+                # Esperar un tiempo para que todos los peers procesen el header
+                time.sleep(0.2)
+
+            # Fase 2: Enviar cuerpo del mensaje a broadcast
+            body = message_id.to_bytes(8, "big") + message_bytes
+            logger.info(
+                f"FASE 2: Enviando cuerpo del mensaje broadcast ({len(body)} bytes)"
+            )
+
+            with self._udp_socket_lock:
+                success = False
+                for broadcast_addr in broadcast_addresses:
+                    try:
+                        self.udp_socket.sendto(body, (broadcast_addr, UDP_PORT))
+                        logger.info(
+                            f"Cuerpo broadcast enviado a {broadcast_addr}:{UDP_PORT}"
+                        )
+                        success = True
+                    except Exception as e:
+                        logger.error(f"Error enviando cuerpo a {broadcast_addr}: {e}")
+
+                if not success:
+                    logger.error(
+                        "No se pudo enviar el cuerpo a ninguna dirección de broadcast"
+                    )
+                    return False
+
+            logger.info("Mensaje broadcast enviado correctamente")
+            return True
+
+        except Exception as e:
+            logger.error(f"Error enviando mensaje broadcast: {e}", exc_info=True)
+            return False
 
     def register_message_callback(self, callback):
         """Registra una función para recibir mensajes"""
@@ -1403,6 +1481,7 @@ if __name__ == "__main__":
     print("Pares conocidos:", ", ".join(peer.get_peers()) or "Ninguno")
     print("\nComandos disponibles:")
     print("  msg <usuario> <mensaje> - Enviar mensaje")
+    print("  broadcast <mensaje>     - Enviar mensaje a todos los usuarios ")
     print("  file <usuario> <ruta>   - Enviar archivo")
     print("  list                    - Listar pares")
     print("  stats                   - Mostrar estadísticas de recursos")
@@ -1424,6 +1503,16 @@ if __name__ == "__main__":
                             print("Error al enviar mensaje")
                     else:
                         print("Formato: msg <usuario> <mensaje>")
+
+                elif cmd.startswith("broadcast "):
+                    parts = cmd.split(maxsplit=1)
+                    if len(parts) == 2:
+                        if peer.broadcast_message(parts[1]):
+                            print("Mensaje broadcast enviado")
+                        else:
+                            print("Error al enviar mensaje broadcast")
+                    else:
+                        print("Formato: broadcast <mensaje>")
 
                 elif cmd.startswith("file "):
                     parts = cmd.split(maxsplit=2)
