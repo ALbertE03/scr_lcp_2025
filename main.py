@@ -8,10 +8,8 @@ import random
 import logging
 import os
 import sys
-import multiprocessing
-import platform
-import subprocess
-import re
+from utils.network_utils import *
+from utils.system_info import *
 
 logging.basicConfig(
     level=logging.INFO,
@@ -19,232 +17,6 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 logger = logging.getLogger("LCP")
-
-
-def get_available_resources():
-    """Determina los recursos disponibles en el sistema de forma más precisa.
-
-    Retorna:
-        dict: Diccionario con información sobre CPUs, memoria, carga del sistema, etc.
-    """
-    resources = {
-        "cpu_count": 0,
-        "memory_gb": 0,
-        "memory_available_gb": 0,
-        "system_load": 0.0,
-        "platform": platform.system(),
-    }
-
-    try:
-        resources["cpu_count"] = multiprocessing.cpu_count()
-        logger.info(f"CPUs lógicas detectadas: {resources['cpu_count']}")
-    except Exception as e:
-        resources["cpu_count"] = 4
-        logger.warning(
-            f"No se pudo detectar el número de CPUs, usando valor por defecto: 4. Error: {e}"
-        )
-
-    # Detección específica para cada sistema operativo
-    if resources["platform"] == "Darwin":  # macOS
-        try:
-            output = subprocess.check_output(["sysctl", "-n", "hw.memsize"]).strip()
-            total_memory_bytes = int(output)
-            resources["memory_gb"] = round(total_memory_bytes / (1024**3), 2)
-
-            # Obtener información de memoria disponible en macOS
-            vm_stat = subprocess.check_output(["vm_stat"]).decode("utf-8").strip()
-            lines = vm_stat.split("\n")
-            memory_data = {}
-
-            for line in lines[1:]:
-                if ":" in line:
-                    key, value = line.split(":", 1)
-                    value = int(value.strip().replace(".", ""))
-                    memory_data[key.strip()] = value
-
-            # Calcular memoria libre (páginas libres + inactivas) en GB
-            page_size = 4096  # Tamaño de página estándar en macOS (4KB)
-            free_pages = memory_data.get("Pages free", 0)
-            inactive_pages = memory_data.get("Pages inactive", 0)
-            free_memory_bytes = (free_pages + inactive_pages) * page_size
-            resources["memory_available_gb"] = round(free_memory_bytes / (1024**3), 2)
-
-            # Obtener carga del sistema
-            load = (
-                subprocess.check_output(["sysctl", "-n", "vm.loadavg"]).decode().strip()
-            )
-            load = load.replace("{", "").replace("}", "").split()[0]
-            resources["system_load"] = float(load)
-
-            logger.info(f"Memoria total: {resources['memory_gb']} GB")
-            logger.info(f"Memoria disponible: {resources['memory_available_gb']} GB")
-            logger.info(f"Carga del sistema: {resources['system_load']}")
-
-        except Exception as e:
-            logger.warning(f"Error obteniendo recursos en macOS: {e}")
-
-    elif resources["platform"] == "Linux":
-        try:
-            # Obtener información de memoria en Linux
-            with open("/proc/meminfo", "r") as f:
-                mem_info = {}
-                for line in f:
-                    if ":" in line:
-                        key, value = line.split(":", 1)
-                        value = value.strip()
-                        if "kB" in value:
-                            value = float(value.replace("kB", "").strip()) / (
-                                1024 * 1024
-                            )
-                        mem_info[key.strip()] = value
-
-            resources["memory_gb"] = float(mem_info.get("MemTotal", 0))
-            resources["memory_available_gb"] = float(mem_info.get("MemAvailable", 0))
-
-            # Obtener carga del sistema
-            with open("/proc/loadavg", "r") as f:
-                load = float(f.read().split()[0])
-            resources["system_load"] = load
-
-            logger.info(f"Memoria total: {resources['memory_gb']} GB")
-            logger.info(f"Memoria disponible: {resources['memory_available_gb']} GB")
-            logger.info(f"Carga del sistema: {resources['system_load']}")
-
-        except Exception as e:
-            logger.warning(f"Error obteniendo recursos en Linux: {e}")
-
-    elif resources["platform"] == "Windows":
-        try:
-            # En Windows usamos ctypes para acceder a información del sistema
-            import ctypes
-
-            # Obtener información de memoria en Windows
-            class MEMORYSTATUSEX(ctypes.Structure):
-                _fields_ = [
-                    ("dwLength", ctypes.c_ulong),
-                    ("dwMemoryLoad", ctypes.c_ulong),
-                    ("ullTotalPhys", ctypes.c_ulonglong),
-                    ("ullAvailPhys", ctypes.c_ulonglong),
-                    ("ullTotalPageFile", ctypes.c_ulonglong),
-                    ("ullAvailPageFile", ctypes.c_ulonglong),
-                    ("ullTotalVirtual", ctypes.c_ulonglong),
-                    ("ullAvailVirtual", ctypes.c_ulonglong),
-                    ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
-                ]
-
-            memory_status = MEMORYSTATUSEX()
-            memory_status.dwLength = ctypes.sizeof(MEMORYSTATUSEX)
-            ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(memory_status))
-
-            resources["memory_gb"] = round(memory_status.ullTotalPhys / (1024**3), 2)
-            resources["memory_available_gb"] = round(
-                memory_status.ullAvailPhys / (1024**3), 2
-            )
-            resources["system_load"] = memory_status.dwMemoryLoad / 100.0
-
-            logger.info(f"Memoria total: {resources['memory_gb']} GB")
-            logger.info(f"Memoria disponible: {resources['memory_available_gb']} GB")
-            logger.info(f"Carga del sistema: {resources['system_load']}")
-
-        except Exception as e:
-            logger.warning(f"Error obteniendo recursos en Windows: {e}")
-
-    return resources
-
-
-def get_network_info():
-    """Obtiene información de red sin dependencias externas"""
-    system = platform.system()
-    broadcast_addresses = []
-
-    try:
-        if system == "Darwin":
-            output = subprocess.check_output(["ifconfig"], universal_newlines=True)
-            interfaces = re.split(r"\n(?=\w)", output)
-
-            for interface in interfaces:
-                if (
-                    "status: active" in interface
-                    and "inet " in interface
-                    and "netmask" in interface
-                ):
-                    ip_match = re.search(r"inet (\d+\.\d+\.\d+\.\d+)", interface)
-                    mask_match = re.search(r"netmask (0x[0-9a-f]+)", interface)
-
-                    if ip_match and mask_match:
-                        ip = ip_match.group(1)
-                        hex_mask = mask_match.group(1)
-                        int_mask = int(hex_mask, 16)
-
-                        mask = [
-                            (int_mask >> 24) & 0xFF,
-                            (int_mask >> 16) & 0xFF,
-                            (int_mask >> 8) & 0xFF,
-                            int_mask & 0xFF,
-                        ]
-                        mask_str = ".".join(map(str, mask))
-
-                        ip_parts = list(map(int, ip.split(".")))
-                        mask_parts = mask
-                        broadcast_parts = []
-
-                        for i in range(4):
-                            broadcast_parts.append(
-                                ip_parts[i] | (~mask_parts[i] & 0xFF)
-                            )
-
-                        broadcast = ".".join(map(str, broadcast_parts))
-                        broadcast_addresses.append(broadcast)
-    except Exception as e:
-        print(f"Error obteniendo información de red: {e}")
-
-    return broadcast_addresses
-
-
-def get_optimal_thread_count():
-    """Determina el número óptimo de hilos basado en los recursos disponibles del sistema."""
-    resources = get_available_resources()
-
-    load_factor = max(
-        0.5, min(1.0, 1.0 - (resources["system_load"] / resources["cpu_count"] / 2))
-    )
-    logger.info(f"Factor de carga calculado: {load_factor:.2f}")
-
-    memory_factor = 1.0
-    if resources["memory_gb"] > 0:
-        memory_percent = (
-            resources["memory_available_gb"] / resources["memory_gb"]
-            if resources["memory_gb"] > 0
-            else 0.5
-        )
-        memory_factor = max(0.5, min(1.5, memory_percent * 2))
-        logger.info(
-            f"Memoria disponible: {int(memory_percent * 100)}% - Factor de memoria: {memory_factor:.2f}"
-        )
-
-    base_msg_per_cpu = 3.0
-    base_file_per_cpu = 1.5
-    base_transfer_per_cpu = 2.0
-
-    effective_cpu = resources["cpu_count"] * load_factor * memory_factor
-
-    msg_workers = max(5, int(effective_cpu * base_msg_per_cpu))
-    file_workers = max(3, int(effective_cpu * base_file_per_cpu))
-    max_transfers = max(4, int(effective_cpu * base_transfer_per_cpu))
-
-    if resources["platform"] == "Darwin":
-        msg_workers = int(msg_workers * 1.2)
-        file_workers = int(file_workers * 1.1)
-
-    msg_workers = min(msg_workers, 40)
-    file_workers = min(file_workers, 20)
-    max_transfers = min(max_transfers, 25)
-
-    logger.info(f"Workers para mensajes calculados: {msg_workers}")
-    logger.info(f"Workers para archivos calculados: {file_workers}")
-    logger.info(f"Límite de transferencias concurrentes: {max_transfers}")
-
-    return msg_workers, file_workers, max_transfers
 
 
 class LCPPeer:
@@ -866,12 +638,33 @@ class LCPPeer:
                 )
             return
 
+        # Almacenar el body_id esperado para esta transferencia en un diccionario compartido
+        with self._peers_lock:
+            expected_file_id = header["body_id"]
+            # Si no existe, crear un nuevo diccionario para este peer
+            if not hasattr(self, "_expected_file_transfers"):
+                self._expected_file_transfers = {}
+
+            # Guardar la información de la transferencia esperada: body_id y tamaño
+            peer_ip = addr[0]
+            self._expected_file_transfers[peer_ip] = {
+                "body_id": expected_file_id,
+                "file_size": file_size,
+                "user_from": user_from,
+                "timestamp": time.time(),
+            }
+            logger.info(
+                f"{worker_name} registrando transferencia esperada de {user_from} con ID {expected_file_id}"
+            )
+
         with self._udp_socket_lock:
             logger.info(
-                f"{worker_name} aceptando solicitud de archivo de {user_from}, tamaño: {file_size} bytes"
+                f"{worker_name} aceptando solicitud de archivo de {user_from}, tamaño: {file_size} bytes, ID: {expected_file_id}"
             )
+            self._send_response(addr, RESPONSE_OK)
+
         logger.info(
-            f"{worker_name} esperando conexión TCP de {user_from} para transferencia de archivo"
+            f"{worker_name} esperando conexión TCP de {user_from} para transferencia de archivo con ID {expected_file_id}"
         )
 
     def _handle_file_transfer(self, conn, addr):
@@ -888,20 +681,59 @@ class LCPPeer:
                 logger.error(
                     f"{worker_name} recibió identificador de archivo incompleto: {len(file_id_bytes)} bytes"
                 )
-                conn.send(self._build_response(RESPONSE_BAD_REQUEST))
+                conn.send(
+                    self._build_response(
+                        RESPONSE_BAD_REQUEST, "ID de archivo incompleto"
+                    )
+                )
                 conn.close()
                 return
 
             file_id = int.from_bytes(file_id_bytes, "big")
             logger.info(f"{worker_name} recibió identificador de archivo: {file_id}")
 
-            # Buscar el peer correspondiente usando la dirección IP
+            # Verificar si tenemos una transferencia esperada desde esta IP y con este ID
+            expected_transfer_info = None
             peer_id = None
+
             with self._peers_lock:
+                if (
+                    hasattr(self, "_expected_file_transfers")
+                    and addr[0] in self._expected_file_transfers
+                ):
+                    expected_transfer_info = self._expected_file_transfers[addr[0]]
+
+                # Buscar el peer_id correspondiente a esta IP
                 for user_id, (ip, _) in self.peers.items():
                     if ip == addr[0]:
                         peer_id = user_id
                         break
+
+            # Verificar que es una transferencia válida
+            if not expected_transfer_info:
+                logger.warning(
+                    f"{worker_name} no hay transferencia esperada desde IP {addr[0]}, rechazando conexión"
+                )
+                conn.send(
+                    self._build_response(
+                        RESPONSE_BAD_REQUEST, "Transferencia no autorizada"
+                    )
+                )
+                conn.close()
+                return
+
+            # Verificar que el ID del archivo coincide con el esperado
+            if expected_transfer_info["body_id"] != file_id:
+                logger.warning(
+                    f"{worker_name} ID de archivo incorrecto: esperado {expected_transfer_info['body_id']}, recibido {file_id}"
+                )
+                conn.send(
+                    self._build_response(
+                        RESPONSE_BAD_REQUEST, "ID de archivo incorrecto"
+                    )
+                )
+                conn.close()
+                return
 
             if not peer_id:
                 logger.warning(
@@ -914,15 +746,18 @@ class LCPPeer:
                 return
 
             logger.info(
-                f"{worker_name} identificó peer como {peer_id} para la transferencia de archivo"
+                f"{worker_name} identificó peer como {peer_id} para la transferencia de archivo con ID {file_id}"
             )
 
             # Crear archivo temporal con el formato lcp_file_<timestamp>_<peer_id>.dat
             timestamp = int(time.time())
             temp_file = f"lcp_file_{timestamp}_{peer_id}.dat"
+            expected_size = expected_transfer_info["file_size"]
 
             try:
-                logger.info(f"{worker_name} creando archivo temporal: {temp_file}")
+                logger.info(
+                    f"{worker_name} creando archivo temporal: {temp_file}, tamaño esperado: {expected_size} bytes"
+                )
 
                 bytes_recibidos = 0
                 with open(temp_file, "wb") as f:
@@ -931,17 +766,30 @@ class LCPPeer:
                     )
 
                     # Recibir el contenido del archivo según el protocolo LCP
-                    while True:
-                        data = conn.recv(4096)
+                    while bytes_recibidos < expected_size:
+                        # Calcular cuántos bytes quedan por recibir
+                        bytes_restantes = expected_size - bytes_recibidos
+                        # Usar un tamaño de buffer adecuado (máximo 4096 bytes)
+                        chunk_size = min(4096, bytes_restantes)
+
+                        data = conn.recv(chunk_size)
                         if not data:
-                            logger.debug(f"{worker_name} fin de transmisión detectado")
+                            logger.debug(
+                                f"{worker_name} fin de transmisión detectado antes de completar"
+                            )
                             break
+
                         f.write(data)
                         bytes_recibidos += len(data)
 
                         if bytes_recibidos % (1024 * 1024) < 4096:  # Log cada ~1MB
+                            progress = (
+                                int((bytes_recibidos / expected_size) * 100)
+                                if expected_size > 0
+                                else 0
+                            )
                             logger.info(
-                                f"{worker_name} progreso: {bytes_recibidos/1024:.1f} KB recibidos de {peer_id}"
+                                f"{worker_name} progreso: {bytes_recibidos/1024:.1f} KB ({progress}%) recibidos de {peer_id}"
                             )
 
             except IOError as e:
@@ -957,12 +805,15 @@ class LCPPeer:
             try:
                 received_size = os.path.getsize(temp_file)
 
-                # Si el archivo está incompleto, reportar un error
-                if received_size == 0:
-                    logger.error(f"{worker_name} archivo recibido vacío")
+                # Verificar si el archivo recibido está completo
+                if received_size != expected_size:
+                    logger.error(
+                        f"{worker_name} tamaño de archivo incorrecto: esperado {expected_size}, recibido {received_size}"
+                    )
                     conn.send(
                         self._build_response(
-                            RESPONSE_BAD_REQUEST, "Archivo recibido vacío"
+                            RESPONSE_BAD_REQUEST,
+                            f"Tamaño incorrecto: esperado {expected_size}, recibido {received_size}",
                         )
                     )
                     return
@@ -971,6 +822,14 @@ class LCPPeer:
                     f"{worker_name} transferencia completa: {bytes_recibidos} bytes recibidos en {temp_file}"
                 )
 
+                # Limpiar la información de transferencia esperada
+                with self._peers_lock:
+                    if (
+                        hasattr(self, "_expected_file_transfers")
+                        and addr[0] in self._expected_file_transfers
+                    ):
+                        del self._expected_file_transfers[addr[0]]
+
                 # Notificar a los callbacks
                 logger.info(
                     f"{worker_name} notificando recepción de archivo a {len(self.file_callbacks)} callbacks"
@@ -978,7 +837,7 @@ class LCPPeer:
                 for callback in self.file_callbacks:
                     callback(peer_id, temp_file)
 
-                # Enviar confirmación final (25 bytes)
+                # Enviar confirmación final (25 bytes) según el protocolo
                 logger.debug(
                     f"{worker_name} enviando confirmación de recepción exitosa a {peer_id}"
                 )
@@ -1506,22 +1365,17 @@ if __name__ == "__main__":
 
     peer = LCPPeer(sys.argv[1])
 
-    # Callback para mensajes entrantes
     def on_message(user_from, message):
         print(f"\n[MSG de {user_from}]: {message}")
 
-    # Callback para archivos entrantes
     def on_file(user_from, file_path):
         print(f"\n[ARCHIVO de {user_from}]: Recibido '{file_path}'")
-        # Aquí podrías mover el archivo a una ubicación permanente
 
-    # Callback para cambios en pares
     def on_peer_change(user_id, added):
         action = "Conectado" if added else "Desconectado"
         print(f"\n[PAIR] {action}: {user_id}")
         print("Pares conocidos:", ", ".join(peer.get_peers()) or "Ninguno")
 
-    # Callback para progreso de transferencias de archivos
     def on_file_progress(user_id, file_path, progress, status):
         if status == "iniciando":
             print(
@@ -1637,5 +1491,4 @@ if __name__ == "__main__":
                 continue
 
     finally:
-        peer.close()
         print("\nChat LCP terminado")
