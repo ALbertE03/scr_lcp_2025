@@ -71,7 +71,7 @@ class LCPChat(tk.Tk):
         username = simpledialog.askstring(
             "LCP Chat",
             "Introduce tu nombre de usuario:",
-            initialvalue=f"Albert",
+            initialvalue="Albert",
         )
         if not username:
             username = f"User{int(time.time())%1000}"

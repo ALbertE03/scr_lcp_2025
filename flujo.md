@@ -8,6 +8,7 @@
   - [Autodescubrimiento](#autodescubrimiento)
   - [Envío de Mensajes](#envío-de-mensajes)
   - [Recepción de Mensajes](#recepción-de-mensajes)
+  - [Mensajes Broadcast](#mensajes-broadcast)
   - [Transferencia de Archivos](#transferencia-de-archivos)
 - [Manejo de Concurrencia](#manejo-de-concurrencia)
 - [Sistema de Seguridad](#sistema-de-seguridad)
@@ -280,6 +281,71 @@ La recepción de mensajes implementa los siguientes detalles técnicos:
    - Si el destinatario es incorrecto: respuesta con `RESPONSE_BAD_REQUEST`
    - Si hay timeout esperando el cuerpo: respuesta con `RESPONSE_INTERNAL_ERROR`
    - Si hay error de decodificación: respuesta con `RESPONSE_BAD_REQUEST`
+
+### Mensajes Broadcast
+
+```
+     PEER A                                        PEERS B, C, D, ...
+     -------                                       ------------------
+       |                                                   |
+       |    [1. HEADER BROADCAST (100 bytes)]              |
+       +---------------------------------------------------->
+       |            Operation = 1 (MESSAGE)                |
+       |            UserIdTo = NULL (Broadcast)            |
+       |            BodyId = unique_message_id             |
+       |            BodyLength = message_size              |
+       |                                                   |
+       |                                         [PEER B, C, D procesan el header]
+       |                                                   |
+       |    [2. BODY BROADCAST (8+N bytes)]                |
+       +---------------------------------------------------->
+       |     [8 bytes: BodyId]                             |
+       |     [N bytes: message_content (UTF-8)]            |
+       |                                                   |
+       |                                         [PEER B, C, D procesan el mensaje]
+       |                                         [Notificación a callbacks]
+```
+
+El protocolo de mensajes broadcast tiene las siguientes características:
+
+1. **Diferencia con mensajes punto a punto**:
+   - Usa el mismo `OperationCode = 1 (MESSAGE)` que los mensajes regulares
+   - Campo `UserIdTo` establecido a `NULL` (rellenado con espacios) para indicar broadcast
+   - No requiere respuestas de confirmación de los destinatarios
+   - Envía una única transmisión para todos los peers en lugar de transmisiones individuales
+
+2. **Implementación detallada de envío**:
+   - Generación de `BodyId` único usando `int(time.time() * 1000) % 256`
+   - Envío del header a todas las direcciones de broadcast detectadas mediante `get_network_info()`
+   - Codificación del mensaje en UTF-8 antes de la transmisión
+   - Protección del socket UDP con `_udp_socket_lock` durante los envíos
+
+3. **Secuencia estricta de envío**:
+   - Fase 1: Envío del header broadcast a todas las interfaces de red
+   - Fase 2: Envío del cuerpo del mensaje broadcast a las mismas interfaces
+   - Serialización completa del proceso para evitar interferencias
+
+4. **Manejo de errores**:
+   - Verificación de éxito (`success`) en el envío a al menos una interfaz
+   - Captura y registro de excepciones por cada interfaz de broadcast
+   - Mantenimiento de consistencia del socket UDP mediante restablecimiento del timeout
+
+5. **Integración con el sistema multi-hilo**:
+   - Los receptores procesan el mensaje broadcast en el mismo flujo que los mensajes normales
+   - El mensaje broadcast es identificado por el campo `UserIdTo` vacío o nulo
+   - Cada receptor encola el mensaje recibido para procesamiento asíncrono
+   - Los workers de mensajes manejan tanto mensajes punto a punto como broadcast
+
+6. **Feedback y confirmaciones**:
+   - A diferencia de los mensajes punto a punto, el remitente NO recibe confirmaciones de quién recibió el mensaje
+   - El remitente no puede saber cuántos o cuáles peers específicos recibieron el mensaje
+   - Los receptores simplemente procesan el mensaje y notifican a sus callbacks registrados
+   - El remitente solo sabe si el mensaje se envió correctamente a la red, no si algún peer lo recibió
+
+7. **Optimización para redes locales**:
+   - Utiliza los mecanismos nativos de broadcast de la red local
+   - Evita sobrecarga de red al enviar una única transmisión en lugar de N individuales
+   - Permite comunicaciones eficientes uno-a-muchos sin coordinación central
 
 ### Transferencia de Archivos
 

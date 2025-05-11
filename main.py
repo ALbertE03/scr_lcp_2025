@@ -1336,7 +1336,6 @@ class LCPPeer:
             bool: True si el mensaje fue enviado, False en caso de error
         """
         logger.info(f"Iniciando envío de mensaje broadcast: {message[:50]}...")
-
         message_id = int(time.time() * 1000) % 256  # BodyId único
         message_bytes = message.encode("utf-8")
 
@@ -1370,9 +1369,6 @@ class LCPPeer:
                     )
                     return False
 
-                # Esperar un tiempo para que todos los peers procesen el header
-                time.sleep(0.2)
-
             # Fase 2: Enviar cuerpo del mensaje a broadcast
             body = message_id.to_bytes(8, "big") + message_bytes
             logger.info(
@@ -1380,7 +1376,6 @@ class LCPPeer:
             )
 
             with self._udp_socket_lock:
-                success = False
                 for broadcast_addr in broadcast_addresses:
                     try:
                         self.udp_socket.sendto(body, (broadcast_addr, UDP_PORT))
@@ -1391,18 +1386,15 @@ class LCPPeer:
                     except Exception as e:
                         logger.error(f"Error enviando cuerpo a {broadcast_addr}: {e}")
 
-                if not success:
-                    logger.error(
-                        "No se pudo enviar el cuerpo a ninguna dirección de broadcast"
-                    )
-                    return False
-
             logger.info("Mensaje broadcast enviado correctamente")
             return True
 
         except Exception as e:
             logger.error(f"Error enviando mensaje broadcast: {e}", exc_info=True)
             return False
+        finally:
+            # Asegurarse de que el socket vuelve a modo no bloqueante
+            self.udp_socket.settimeout(None)
 
     def register_message_callback(self, callback):
         """Registra una función para recibir mensajes"""
