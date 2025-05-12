@@ -437,8 +437,10 @@ class LCPChat(tk.Tk):
 
     def on_peer_change(self, user_id, added):
         """Callback para cambios en la lista de peers"""
+        # Normalizar el ID de usuario para mostrar consistentemente
+        clean_user_id = user_id.strip() if user_id else user_id
         action = "conectado" if added else "desconectado"
-        self.append_to_chat("Sistema", f"Usuario {user_id} se ha {action}")
+        self.append_to_chat("Sistema", f"Usuario {clean_user_id} se ha {action}")
         self.refresh_users()
 
     def on_file_progress(self, user_id, file_path, progress, status):

@@ -1,0 +1,39 @@
+version: '3'
+
+services:
+  lcp-node-1:
+    build: .
+    container_name: lcp-node-1
+    tty: true
+    stdin_open: true
+    command: main.py "Usuario1"
+    networks:
+      - lcp-net
+    volumes:
+      - ./received_files_1:/app/received_files
+
+  lcp-node-2:
+    build: .
+    container_name: lcp-node-2
+    tty: true
+    stdin_open: true
+    command: main.py "Usuario2"
+    networks:
+      - lcp-net
+    volumes:
+      - ./received_files_2:/app/received_files
+
+  lcp-node-3:
+    build: .
+    container_name: lcp-node-3
+    tty: true
+    stdin_open: true
+    command: main.py "Usuario3"
+    networks:
+      - lcp-net
+    volumes:
+      - ./received_files_3:/app/received_files
+
+networks:
+  lcp-net:
+    driver: bridge
