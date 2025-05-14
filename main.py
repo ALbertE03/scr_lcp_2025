@@ -12,7 +12,7 @@ from utils.network_utils import *
 from utils.system_info import *
 
 logging.basicConfig(
-    level=logging.INFO,  # Cambiado de WARNING a INFO para ver más información
+    level=logging.INFO,
     format="%(asctime)s [%(threadName)s] [%(levelname)s] %(message)s",
     datefmt="%H:%M:%S",
 )
@@ -21,24 +21,20 @@ logger = logging.getLogger("LCP")
 
 class LCPPeer:
     def __init__(self, user_id):
-        # Asegurar que el ID tiene exactamente 20 bytes en UTF-8 como requiere el protocolo
+
         self.user_id_str, self.user_id = self._ensure_20_bytes_id(user_id)
 
-        # Verificar que realmente tenemos exactamente 20 bytes
         if len(self.user_id) != 20:
             logger.warning(
                 f"Error crítico: ID no tiene exactamente 20 bytes (tiene {len(self.user_id)} bytes)"
             )
-            # Forzar a 20 bytes exactos como última opción
             if len(self.user_id) < 20:
                 self.user_id = self.user_id + b" " * (20 - len(self.user_id))
             else:
                 self.user_id = self.user_id[:20]
-            # Actualizar la versión en string
             try:
                 self.user_id_str = self.user_id.decode("utf-8")
             except UnicodeDecodeError:
-                # Caso extremo: usar un ID básico
                 self.user_id_str = "Unknown".ljust(20)
                 self.user_id = self.user_id_str.encode("utf-8")
 
@@ -123,45 +119,25 @@ class LCPPeer:
             threading.Thread(
                 target=self._message_worker, daemon=True, name=worker_name
             ).start()
-            logger.info(f"Worker de mensajes {worker_name} iniciado")
+        logger.info(f"Worker de mensajes {worker_name} iniciado")
 
         for i in range(self.file_workers_count):
             worker_name = f"FileSender-{i+1}"
             threading.Thread(
                 target=self._file_send_worker, daemon=True, name=worker_name
             ).start()
-            logger.info(f"Worker de envío de archivos {worker_name} iniciado")
+        logger.info(f"Worker de envío de archivos {worker_name} iniciado")
 
     def _build_header(self, user_to, operation, body_id=0, body_length=0):
         """Construye el header"""
         header = bytearray(100)
-
-        # UserID From: Ya está verificado desde el constructor
         header[0:20] = self.user_id
-
-        # Si user_to es None, es un mensaje de broadcast
         if user_to is None:
             header[20:40] = BROADCAST_ID
             logger.debug(f"Configurando destino como BROADCAST en header")
         else:
-            # Usar nuestra función para asegurar que user_to tiene exactamente 20 bytes
-            _, user_to_bytes = self._ensure_20_bytes_id(user_to)
-
-            # Verificar que tenemos exactamente 20 bytes
-            if len(user_to_bytes) != 20:
-                logger.warning(
-                    f"Error en _build_header: ID destino no tiene 20 bytes exactos ({len(user_to_bytes)})"
-                )
-                # Ajustar a exactamente 20 bytes
-                if len(user_to_bytes) < 20:
-                    user_to_bytes = user_to_bytes + b" " * (20 - len(user_to_bytes))
-                else:
-                    user_to_bytes = user_to_bytes[:20]
-
-            header[20:40] = user_to_bytes
-            logger.debug(
-                f"Configurando destino como {user_to} en header (bytes: {user_to_bytes.hex()})"
-            )
+            header[20:40] = user_to.encode("utf-8").ljust(20, b"\x00")
+            logger.debug(f"Configurando destino como {user_to} en header)")
 
         header[40] = operation
         header[41] = body_id
@@ -174,13 +150,11 @@ class LCPPeer:
         if len(data) < 100:
             return None
 
-        # Verificar si user_to es broadcast (todos los bytes son 0xFF)
         user_to_bytes = data[20:40]
         is_broadcast = all(b == 0xFF for b in user_to_bytes)
 
-        # Si es broadcast, usar "\xff" * 20 como user_to, de lo contrario decodificar normalmente
         if is_broadcast:
-            user_to = "\xff" * 20
+            user_to = BROADCAST_ID
         else:
             try:
                 user_to = user_to_bytes.decode("utf-8").rstrip("\x00")
@@ -216,7 +190,7 @@ class LCPPeer:
         """
         response = bytearray(25)
         response[0] = status
-        response[1:21] = self.user_id  # Ya codificado en UTF-8 desde el constructor
+        response[1:21] = self.user_id
 
         status_text = {
             RESPONSE_OK: "OK",
@@ -269,18 +243,14 @@ class LCPPeer:
         """Servicio periódico de autodescubrimiento"""
         while True:
             try:
-                # Enviar ECHO sin esperar respuestas aquí
-                # Las respuestas se procesarán en el UDP listener
-                self.send_echo(wait_responses=False)
-
-                # Realizar limpieza de peers
+                self.send_echo()
                 self._cleanup_inactive_peers()
-
-                # Esperar antes de la siguiente iteración
-                time.sleep(10)  # Aumentar a 10s para reducir tráfico de red
+                time.sleep(10)
             except Exception as e:
-                logger.error(f"Error en servicio de autodescubrimiento: {e}")
-                time.sleep(5)  # En caso de error, esperar antes de reintentar
+                logger.error(
+                    f"Error en servicio de autodescubrimiento: {e}", exc_info=True
+                )
+                time.sleep(5)
 
     def _cleanup_inactive_peers(self):
         """Limpia peers inactivos de la lista de peers conocidos y consolida duplicados"""
@@ -289,40 +259,31 @@ class LCPPeer:
         consolidated_peers = []
 
         with self._peers_lock:
-            # Primero, consolidar entradas duplicadas (con normalización)
             normalized_peers = {}
             for user_id, (ip, last_seen) in list(self.peers.items()):
-                # Usar nuestra función de normalización para consistencia
                 normalized_id = self._normalize_user_id(user_id)
 
                 if normalized_id in normalized_peers:
-                    # Ya tenemos una entrada para este peer (normalizado)
                     existing_ip, existing_time = normalized_peers[normalized_id]
-                    # Mantener la entrada más reciente
                     if last_seen > existing_time:
                         normalized_peers[normalized_id] = (ip, last_seen)
-                    # Marcar este duplicado para eliminación
                     self.peers.pop(user_id, None)
                     consolidated_peers.append((user_id, normalized_id))
                 else:
                     normalized_peers[normalized_id] = (ip, last_seen)
 
-            # Ahora detectar cuáles están inactivos (sin actividad por >90s)
             inactive = {
                 normalized_id: (ip, last_seen)
                 for normalized_id, (ip, last_seen) in normalized_peers.items()
                 if now - last_seen > timedelta(seconds=90)
             }
 
-            # Eliminar peers inactivos de la lista actual
             for normalized_id, (ip, last_seen) in inactive.items():
                 to_remove = []
-                # Buscar todas las variantes de este ID en self.peers
                 for peer_id in self.peers.keys():
                     if self._normalize_user_id(peer_id) == normalized_id:
                         to_remove.append(peer_id)
 
-                # Eliminar todas las variantes encontradas
                 for peer_id in to_remove:
                     logger.info(
                         f"Peer inactivo eliminado: {normalized_id} (sin actividad por >90s)"
@@ -330,34 +291,24 @@ class LCPPeer:
                     self.peers.pop(peer_id, None)
                     inactive_peers.append(normalized_id)
 
-        # Log de consolidaciones realizadas (fuera del lock)
         for old_id, new_id in consolidated_peers:
             logger.debug(f"Consolidado peer duplicado: '{old_id}' -> '{new_id}'")
 
-        # Notificar desconexiones fuera del lock
         if inactive_peers:
             with self._callback_lock:
                 for user_id in inactive_peers:
                     for callback in self.peer_discovery_callbacks:
                         callback(user_id, False)
 
-    def send_echo(self, wait_responses=False):
+    def send_echo(self):
         """Operación 0: Echo-Reply para descubrimiento de pares
 
         Args:
             wait_responses: Si es True, espera respuestas durante un breve tiempo
                            y procesa los peers que responden
         """
-        # Crear un header específico para operación ECHO (broadcast)
-        header = bytearray(100)
-        # UserIdFrom: nuestro ID de usuario
-        header[0:20] = self.user_id
-        # UserIdTo: Broadcast (0xFF * 20)
-        header[20:40] = BROADCAST_ID
-        # OperationCode: 0 (Echo)
-        header[40] = 0
+        header = self._build_header(None, 0)
 
-        # Log de debug con información detallada del header
         logger.debug(
             f"Header ECHO construido manualmente: {header[0:20].hex()[:20]}... -> {header[20:40].hex()[:20]}... op={header[40]}"
         )
@@ -365,20 +316,13 @@ class LCPPeer:
             f"Enviando ECHO con ID origen: '{self.user_id_str.strip()}' (bytes: {header[0:20].hex()[:20]})"
         )
 
-        # Crear un socket temporal para envío y recepción de ECHO
-        # Esto evita bloquear el socket principal del UDP listener
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as echo_socket:
             echo_socket.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-            echo_socket.bind(("0.0.0.0", 0))  # Puerto efímero
+            echo_socket.bind(("0.0.0.0", 0))
 
-            # Enviar ECHO a todas las direcciones broadcast
             for i in get_network_info():
                 logger.info(f"Enviando ECHO (broadcast) a {i}:{UDP_PORT}")
                 echo_socket.sendto(header, (i, UDP_PORT))
-
-            # Solo esperar respuestas si se solicita explícitamente
-            if not wait_responses:
-                return
 
             echo_socket.settimeout(5)
             logger.info(f"Esperando respuestas al ECHO durante 5 segundos...")
@@ -391,66 +335,30 @@ class LCPPeer:
                         resp_data, resp_addr = echo_socket.recvfrom(25)
 
                         if len(resp_data) == 25:
-                            # Analizar el primer byte como posible status code o parte de un ID
                             raw_status = resp_data[0]
-
-                            # Vamos a examinar los primeros datos como posible ID de usuario
-                            # en lugar de como código de respuesta
-                            user_id_bytes = resp_data[
-                                0:20
-                            ]  # Usar los primeros 20 bytes como el ID
-
-                            # Si el primer byte es 0, es una respuesta formateada correctamente
-                            # Si no es 0, probablemente es un caso donde el primer byte es parte del UserID
+                            user_id_bytes = resp_data[0:20]
 
                             if raw_status == 0:
-                                # Caso normal: el primer byte es 0 (status OK) y el ID está en los bytes 1-21
                                 user_id_bytes = resp_data[1:21]
                                 logger.debug(
                                     f"Respuesta ECHO con formato correcto: status=0, ID sigue después"
                                 )
-                            else:
-                                # Este es el caso donde el primer byte no es 0 pero posiblemente sea
-                                # parte del ID del usuario (como 68 = 'D' de "DockerUser")
-                                # Utilizaremos 20 bytes desde el inicio como ID
-                                user_id_bytes = resp_data[0:20]
-                                logger.debug(
-                                    f"Respuesta ECHO con posible primer byte de ID: {raw_status} (ASCII: {chr(raw_status) if 32 <= raw_status <= 127 else 'n/a'})"
-                                )
 
-                            # Intentar remover null bytes y espacios para limpiar el ID
                             user_id_bytes = user_id_bytes.rstrip(b"\x00")
 
-                            # Intentar decodificar
                             try:
                                 user_id = user_id_bytes.decode("utf-8")
-                                # Usar nuestra función de normalización para consistencia
                                 user_id = self._normalize_user_id(user_id)
-                                # Si el ID está vacío después de la limpieza, generamos uno basado en la IP
-                                if not user_id:
-                                    user_id = f"Unknown-{resp_addr[0]}"
-                                    logger.warning(
-                                        f"ID vacío en respuesta ECHO, usando ID generado: {user_id}"
-                                    )
                             except UnicodeDecodeError:
-                                # Si no podemos decodificar, usamos una representación hexadecimal
-                                user_id = f"User-0x{user_id_bytes.hex()[:8]}"
-                                logger.warning(
-                                    f"Error decodificando ID en respuesta ECHO: {user_id_bytes.hex()}, usando: {user_id}"
-                                )
+                                logger.warning(f"Error decodificando ID de usuario")
                                 continue
 
-                            # Verificar que no estamos recibiendo nuestra propia respuesta
                             my_id = self._normalize_user_id(self.user_id_str)
                             if user_id == my_id:
                                 logger.debug(
                                     f"Ignorando respuesta ECHO de nosotros mismos: {user_id}"
                                 )
                                 continue
-
-                            logger.debug(
-                                f"Bytes en bruto de respuesta ECHO: {resp_data.hex()[:40]}"
-                            )
 
                             logger.info(
                                 f"Recibida respuesta ECHO de '{user_id}' desde {resp_addr[0]}:{resp_addr[1]}"
@@ -460,12 +368,10 @@ class LCPPeer:
                             )
 
                             with self._peers_lock:
-                                # Verificar si ya tenemos este peer (con cualquier variación de espacios)
                                 existing_peer = False
 
                                 for existing_id in list(self.peers.keys()):
                                     if self._normalize_user_id(existing_id) == user_id:
-                                        # Actualizar la entrada existente
                                         existing_peer = True
                                         self.peers[existing_id] = (
                                             resp_addr[0],
@@ -473,17 +379,12 @@ class LCPPeer:
                                         )
                                         break
 
-                                # Si es un peer nuevo, agregarlo
                                 if not existing_peer:
                                     is_new = True
 
-                                    # Asegurar que el ID cumple con la especificación exacta de 20 bytes
-                                    # La función de crear respuesta espera exactamente 20 bytes
                                     user_id_bytes_final = user_id.encode("utf-8")
 
-                                    # Ajustar el ID para que tenga exactamente 20 bytes UTF-8
                                     if len(user_id_bytes_final) > 20:
-                                        # Truncar a 20 bytes pero asegurando que sea UTF-8 válido
                                         user_id_bytes_final = user_id_bytes_final[:20]
                                         while True:
                                             try:
@@ -506,10 +407,8 @@ class LCPPeer:
                                                     )
                                                     break
                                     else:
-                                        # Si es menor a 20 bytes, rellenar con espacios
                                         user_id_final = user_id.ljust(20)[:20]
 
-                                    # Guardar con el ID formateado apropiadamente
                                     self.peers[user_id_final] = (
                                         resp_addr[0],
                                         datetime.now(),
@@ -538,7 +437,6 @@ class LCPPeer:
         logger.info("Iniciando escucha de mensajes UDP en puerto %d", UDP_PORT)
         while True:
             try:
-                # No usar timeout en el listener principal para evitar errores innecesarios
                 self.udp_socket.settimeout(None)
 
                 data, addr = self.udp_socket.recvfrom(1024)
@@ -556,11 +454,9 @@ class LCPPeer:
                     f"Lanzado hilo {handler_thread.name} para procesar mensaje UDP"
                 )
             except socket.timeout:
-                # Manejar timeouts silenciosamente para evitar logs innecesarios
                 continue
             except Exception as e:
                 logger.error(f"Error en UDP listener: {e}")
-                # Pequeña pausa para evitar bucles infinitos en caso de error persistente
                 time.sleep(0.1)
 
     def _handle_udp_message(self, data, addr):
@@ -568,10 +464,9 @@ class LCPPeer:
         try:
             header = self._parse_header(data)
             if not header:
-                # Los mensajes de 25 bytes probablemente son respuestas válidas del protocolo
                 if len(data) == 25:
                     logger.debug(
-                        f"Recibida respuesta de protocolo de 25 bytes desde {addr[0]}:{addr[1]}"
+                        f"Recibida respuesta de protocolo de 25 bytes desde {addr[0]}:{addr[1]} data: {data}"
                     )
                 else:
                     logger.warning(
@@ -579,34 +474,29 @@ class LCPPeer:
                     )
                 return
 
-            # Normalizar IDs para comparaciones usando la función centralizada
             sender_id = self._normalize_user_id(header["user_from"])
             my_id = self._normalize_user_id(self.user_id_str)
 
-            # Verificar si es nuestro propio mensaje
             if sender_id == my_id:
                 logger.debug(f"Ignorando mensaje propio desde {addr[0]}:{addr[1]}")
                 return
 
             with self._peers_lock:
-                # Comprobar si ya existe este peer (usando IDs normalizados para la comparación)
                 clean_id_exists = False
                 for existing_id in list(self.peers.keys()):
                     if self._normalize_user_id(existing_id) == sender_id:
-                        # Actualizar el registro existente con su ID original
-                        self.peers[existing_id] = (addr[0], datetime.now())
+                        self.peers[self._normalize_user_id(existing_id)] = (
+                            addr[0],
+                            datetime.now(),
+                        )
                         clean_id_exists = True
                         break
-
-                # Si no encontramos una versión normalizada, es un peer realmente nuevo
                 is_new = not clean_id_exists
                 if is_new:
-                    # Asegurar que el ID del peer cumple con la especificación exacta de 20 bytes
-                    # Primero lo codificamos para verificar su tamaño en bytes
+
                     sender_bytes = header["user_from"].encode("utf-8")
 
                     if len(sender_bytes) > 20:
-                        # Truncar a 20 bytes pero asegurando que sea UTF-8 válido
                         sender_bytes = sender_bytes[:20]
                         while True:
                             try:
@@ -618,12 +508,9 @@ class LCPPeer:
                                     normalized_id = f"Unknown-{addr[0]}"
                                     break
                     else:
-                        # Si es menor a 20 bytes, rellenar con espacios
                         normalized_id = header["user_from"].ljust(20)[:20]
 
-                    # Guardar con el ID normalizado para evitar duplicados
                     self.peers[normalized_id] = (addr[0], datetime.now())
-
                 status_text = "nuevo" if is_new else "existente"
                 logger.info(
                     f"Peer {status_text} registrado: {sender_id} en {addr[0]}:{addr[1]}"
@@ -697,12 +584,10 @@ class LCPPeer:
             f"{worker_name} procesando ECHO de {user_from} desde {addr[0]}:{addr[1]}"
         )
 
-        # Verificar que el mensaje es un broadcast válido o está dirigido a nosotros
         expected_recipient = self.user_id_str.rstrip("\x00")
         user_to = header["user_to"]
 
-        # Si no es broadcast y no está dirigido a nosotros, ignorarlo
-        if user_to != "\xff" * 20 and user_to != expected_recipient:
+        if user_to != BROADCAST_ID and user_to != expected_recipient:
             logger.debug(
                 f"{worker_name} ignorando ECHO para otro destinatario: {user_to}"
             )
@@ -711,20 +596,13 @@ class LCPPeer:
         with self._udp_socket_lock:
             logger.debug(f"{worker_name} enviando respuesta a ECHO de {user_from}")
 
-            # Crear una respuesta de eco especial
-            echo_response = bytearray(25)
-            # IMPORTANTE: Establecer primer byte a 0 para indicar que es RESPONSE_OK
-            echo_response[0] = RESPONSE_OK  # Esto es crítico para compatibilidad
-            # Copiar nuestro ID en los siguientes 20 bytes de la respuesta
-            echo_response[1:21] = self.user_id
-            # Los últimos 4 bytes quedan en 0
+            echo_response = self._build_response(RESPONSE_OK)
 
             logger.debug(
                 f"{worker_name} enviando respuesta ECHO: status={RESPONSE_OK}, ID={self.user_id_str.strip()} (bytes: {echo_response.hex()})"
             )
 
             try:
-                # Enviar la respuesta formateada
                 self.udp_socket.sendto(echo_response, addr)
                 logger.info(f"{worker_name} respuesta a ECHO enviada a {user_from}")
             except Exception as e:
@@ -734,7 +612,6 @@ class LCPPeer:
         """Procesa operación 1: Message-Response"""
         user_from = header["user_from"]
         worker_name = threading.current_thread().name
-
         logger.info(
             f"{worker_name} iniciando procesamiento de mensaje de {user_from} desde {addr[0]}:{addr[1]}"
         )
@@ -750,186 +627,211 @@ class LCPPeer:
                 f"{worker_name} adquirió lock de conversación para {user_from}"
             )
 
-            with socket.socket(
-                socket.AF_INET, socket.SOCK_DGRAM
-            ) as conversation_socket:
-                local_port = 0
-                conversation_socket.bind(("0.0.0.0", local_port))
-                local_addr = conversation_socket.getsockname()
+            if not all(
+                key in header
+                for key in [
+                    "user_from",
+                    "user_to",
+                    "operation",
+                    "body_id",
+                    "body_length",
+                ]
+            ):
+                with self._udp_socket_lock:
+                    logger.warning(
+                        f"{worker_name} rechazando header de {user_from} por formato incorrecto"
+                    )
+                    self._send_response(
+                        addr, RESPONSE_BAD_REQUEST, "Header incompleto o malformado"
+                    )
+                return
+
+            expected_recipient = self.user_id_str.rstrip("\x00")
+            if (
+                header["user_to"] != expected_recipient
+                and header["user_to"] != BROADCAST_ID
+            ):
+                with self._udp_socket_lock:
+                    logger.warning(
+                        f"{worker_name} rechazando mensaje para destinatario incorrecto: {header['user_to']}"
+                    )
+                    self._send_response(
+                        addr,
+                        RESPONSE_BAD_REQUEST,
+                        f"Destinatario incorrecto: esperaba {expected_recipient}",
+                    )
+                return
+
+            # Fase 1: Enviar confirmación del header
+            with self._udp_socket_lock:
+                logger.debug(
+                    f"{worker_name} enviando confirmación de header (phase 1) a {addr[0]}:{addr[1]}"
+                )
+                self._send_response(addr, RESPONSE_OK)
+                logger.info(f"{worker_name} confirmó recepción de header a {user_from}")
+
+            # Fase 2: Recibir cuerpo del mensaje usando el socket principal
+            try:
+                timeout_secs = 5
                 logger.info(
-                    f"{worker_name} creó socket UDP temporal en puerto {local_addr[1]} para conversación"
+                    f"{worker_name} esperando cuerpo del mensaje de {user_from} (timeout: {timeout_secs}s)"
                 )
 
-                if not all(
-                    key in header
-                    for key in [
-                        "user_from",
-                        "user_to",
-                        "operation",
-                        "body_id",
-                        "body_length",
-                    ]
-                ):
-                    with self._udp_socket_lock:
-                        logger.warning(
-                            f"{worker_name} rechazando header de {user_from} por formato incorrecto"
-                        )
-                        self._send_response(
-                            addr, RESPONSE_BAD_REQUEST, "Header incompleto o malformado"
-                        )
-                    return
+                with self._udp_socket_lock:
+                    self.udp_socket.settimeout(timeout_secs)
+                    buffer_size = header["body_length"] + 8 + 256
+                    body_data, msg_addr = self.udp_socket.recvfrom(buffer_size)
+                    self.udp_socket.settimeout(None)
 
-                # Verificar que el mensaje está dirigido a nosotros
-                expected_recipient = self.user_id_str.rstrip("\x00")
-                if (
-                    header["user_to"] != expected_recipient
-                    and header["user_to"] != "\xff" * 20
-                ):
+                logger.info(
+                    f"{worker_name} recibió {len(body_data)} bytes de datos desde {msg_addr[0]}:{msg_addr[1]}"
+                )
+
+                if msg_addr[0] != addr[0]:
+                    logger.warning(
+                        f"{worker_name} detectó IP diferente en mensaje de datos: esperaba {addr[0]}, recibió {msg_addr[0]}"
+                    )
                     with self._udp_socket_lock:
-                        logger.warning(
-                            f"{worker_name} rechazando mensaje para destinatario incorrecto: {header['user_to']}"
-                        )
                         self._send_response(
                             addr,
                             RESPONSE_BAD_REQUEST,
-                            f"Destinatario incorrecto: esperaba {expected_recipient}",
+                            "Origen del mensaje no coincide con el header",
                         )
                     return
 
-                with self._udp_socket_lock:
+                received_body_id = (
+                    int.from_bytes(body_data[:8], "big") if len(body_data) >= 8 else -1
+                )
+                expected_body_id = header["body_id"]
+
+                if received_body_id == expected_body_id:
                     logger.debug(
-                        f"{worker_name} enviando confirmación de header (phase 1) a {addr[0]}:{addr[1]}"
-                    )
-                    self._send_response(addr, RESPONSE_OK)
-                    logger.info(
-                        f"{worker_name} confirmó recepción de header a {user_from}"
+                        f"{worker_name} verificó BodyId correcto: {received_body_id}"
                     )
 
-                # Fase 2: Recibir cuerpo del mensaje
-                try:
-                    logger.info(
-                        f"{worker_name} esperando cuerpo del mensaje de {user_from} (timeout: 5s)"
-                    )
-                    conversation_socket.settimeout(5)
-                    body_data, msg_addr = conversation_socket.recvfrom(65507)
-                    logger.info(
-                        f"{worker_name} recibió {len(body_data)} bytes de datos desde {msg_addr[0]}:{msg_addr[1]}"
-                    )
+                    expected_length = header["body_length"]
+                    actual_length = len(body_data) - 8
 
-                    # Verificar el origen del mensaje
-                    if msg_addr[0] != addr[0]:
+                    if actual_length != expected_length:
                         logger.warning(
-                            f"{worker_name} detectó IP diferente en mensaje de datos: esperaba {addr[0]}, recibió {msg_addr[0]}"
+                            f"{worker_name} tamaño de mensaje incorrecto: esperaba {expected_length}, recibió {actual_length}"
                         )
                         with self._udp_socket_lock:
                             self._send_response(
                                 addr,
                                 RESPONSE_BAD_REQUEST,
-                                "Origen del mensaje no coincide con el header",
+                                "Tamaño de mensaje incorrecto",
                             )
                         return
 
-                    # Verificar que el BodyId coincida
-                    received_body_id = (
-                        int.from_bytes(body_data[:8], "big")
-                        if len(body_data) >= 8
-                        else -1
-                    )
-                    expected_body_id = header["body_id"]
-
-                    if received_body_id == expected_body_id:
-                        logger.debug(
-                            f"{worker_name} verificó BodyId correcto: {received_body_id}"
-                        )
-
-                        # Verificar que el tamaño del mensaje coincide con lo indicado en el header
-                        expected_length = header["body_length"]
-                        actual_length = (
-                            len(body_data) - 8
-                        )  # Restar los 8 bytes del BodyId
-
-                        if actual_length != expected_length:
-                            logger.warning(
-                                f"{worker_name} tamaño de mensaje incorrecto: esperaba {expected_length}, recibió {actual_length}"
-                            )
-                            with self._udp_socket_lock:
-                                self._send_response(
-                                    addr,
-                                    RESPONSE_BAD_REQUEST,
-                                    "Tamaño de mensaje incorrecto",
-                                )
-                            return
-
+                    try:
                         try:
                             message = body_data[8:].decode("utf-8")
-                            logger.info(
-                                f"{worker_name} decodificó mensaje de {user_from}: {message[:50]}..."
+                        except UnicodeDecodeError:
+                            message = body_data[8:].decode("utf-8", errors="replace")
+                            logger.warning(
+                                f"{worker_name} mensaje con caracteres inválidos de {user_from}"
                             )
 
-                            # Usar lock para callbacks
+                        log_len = min(50, len(message))
+                        log_preview = message[:log_len] + (
+                            "..." if len(message) > log_len else ""
+                        )
+                        logger.info(
+                            f"{worker_name} decodificó mensaje de {user_from}: {log_preview}"
+                        )
+
+                        if not message.strip():
+                            logger.warning(
+                                f"{worker_name} mensaje vacío recibido de {user_from}, ignorando"
+                            )
+                            with self._udp_socket_lock:
+                                self._send_response(addr, RESPONSE_OK)
+                            return
+                        callbacks_count = len(self.message_callbacks)
+                        if callbacks_count == 0:
+                            logger.debug(
+                                f"{worker_name} no hay callbacks registrados, mensaje ignorado"
+                            )
+                        else:
+                            safe_user_from = user_from.strip()
                             with self._callback_lock:
                                 logger.debug(
-                                    f"{worker_name} notificando mensaje a {len(self.message_callbacks)} callbacks"
+                                    f"{worker_name} notificando mensaje a {callbacks_count} callbacks"
                                 )
-                                for callback in self.message_callbacks:
-                                    callback(user_from, message)
+                                for i, callback in enumerate(self.message_callbacks):
+                                    try:
+                                        callback(safe_user_from, message)
+                                        if i == 0 or i == callbacks_count - 1:
+                                            logger.debug(
+                                                f"{worker_name} callback {i+1}/{callbacks_count} completado"
+                                            )
+                                    except Exception as cb_e:
+                                        logger.error(
+                                            f"{worker_name} error en callback {i+1}: {cb_e}",
+                                            exc_info=True,
+                                        )
 
-                            # Fase 3: Confirmar recepción
-                            with self._udp_socket_lock:
-                                logger.debug(
-                                    f"{worker_name} enviando confirmación final (phase 3) a {addr[0]}:{addr[1]}"
-                                )
-                                self._send_response(addr, RESPONSE_OK)
-                                logger.info(
-                                    f"{worker_name} completó procesamiento de mensaje de {user_from}"
-                                )
-                        except UnicodeDecodeError:
-                            logger.error(
-                                f"{worker_name} error decodificando mensaje como UTF-8"
+                        # Fase 3: Confirmar recepción
+                        with self._udp_socket_lock:
+                            logger.debug(
+                                f"{worker_name} enviando confirmación final (phase 3) a {addr[0]}:{addr[1]}"
                             )
-                            with self._udp_socket_lock:
-                                self._send_response(
-                                    addr,
-                                    RESPONSE_BAD_REQUEST,
-                                    "Error de codificación del mensaje",
-                                )
-                    else:
-                        logger.warning(
-                            f"{worker_name} error de BodyId: esperaba {expected_body_id}, recibió {received_body_id}"
+                            self._send_response(addr, RESPONSE_OK)
+                            logger.info(
+                                f"{worker_name} completó procesamiento de mensaje de {user_from}"
+                            )
+                    except UnicodeDecodeError as ude:
+                        logger.error(
+                            f"{worker_name} error decodificando mensaje como UTF-8: {ude}"
                         )
                         with self._udp_socket_lock:
                             self._send_response(
                                 addr,
                                 RESPONSE_BAD_REQUEST,
-                                f"BodyId incorrecto: esperaba {expected_body_id}, recibió {received_body_id}",
+                                "Error de codificación del mensaje",
                             )
-
-                except socket.timeout:
-                    logger.error(
-                        f"{worker_name} timeout esperando datos de mensaje de {user_from}"
+                else:
+                    logger.warning(
+                        f"{worker_name} error de BodyId: esperaba {expected_body_id}, recibió {received_body_id}"
                     )
                     with self._udp_socket_lock:
                         self._send_response(
                             addr,
-                            RESPONSE_INTERNAL_ERROR,
-                            "Timeout esperando datos del mensaje",
+                            RESPONSE_BAD_REQUEST,
+                            f"BodyId incorrecto: esperaba {expected_body_id}, recibió {received_body_id}",
                         )
-                except Exception as e:
-                    logger.error(
-                        f"{worker_name} error procesando mensaje de {user_from}: {e}",
-                        exc_info=True,
+
+            except socket.timeout:
+                logger.error(
+                    f"{worker_name} timeout esperando datos de mensaje de {user_from}"
+                )
+                with self._udp_socket_lock:
+                    self.udp_socket.settimeout(None)
+                    self._send_response(
+                        addr,
+                        RESPONSE_INTERNAL_ERROR,
+                        "Timeout esperando datos del mensaje",
                     )
-                    with self._udp_socket_lock:
-                        self._send_response(
-                            addr, RESPONSE_INTERNAL_ERROR, f"Error interno: {str(e)}"
-                        )
-                finally:
-                    # Limpiar locks viejos periódicamente
-                    if random.random() < 0.1:
-                        logger.debug(
-                            f"{worker_name} iniciando limpieza de locks de conversación antiguos"
-                        )
-                        self._cleanup_conversation_locks()
+            except Exception as e:
+                logger.error(
+                    f"{worker_name} error procesando mensaje de {user_from}: {e}",
+                    exc_info=True,
+                )
+                with self._udp_socket_lock:
+                    self.udp_socket.settimeout(None)
+                    self._send_response(
+                        addr, RESPONSE_INTERNAL_ERROR, f"Error interno: {str(e)}"
+                    )
+            finally:
+                with self._udp_socket_lock:
+                    self.udp_socket.settimeout(None)
+
+                if random.random() < 0.1:
+                    logger.debug(
+                        f"{worker_name} iniciando limpieza de locks de conversación antiguos"
+                    )
+                    self._cleanup_conversation_locks()
 
     def _process_file_request(self, header, addr):
         """Procesa operación 2: Send File-Ack"""
@@ -938,7 +840,6 @@ class LCPPeer:
 
         logger.info(f"{worker_name} procesando solicitud de archivo de {user_from}")
 
-        # Verificar que el header es válido
         if not all(
             key in header
             for key in ["user_from", "user_to", "operation", "body_id", "body_length"]
@@ -952,7 +853,6 @@ class LCPPeer:
                 )
             return
 
-        # Verificar que el archivo está dirigido a nosotros
         expected_recipient = self.user_id_str.rstrip("\x00")
         if header["user_to"] != expected_recipient:
             with self._udp_socket_lock:
@@ -979,14 +879,11 @@ class LCPPeer:
                 )
             return
 
-        # Almacenar el body_id esperado para esta transferencia en un diccionario compartido
         with self._peers_lock:
             expected_file_id = header["body_id"]
-            # Si no existe, crear un nuevo diccionario para este peer
             if not hasattr(self, "_expected_file_transfers"):
                 self._expected_file_transfers = {}
 
-            # Guardar la información de la transferencia esperada: body_id y tamaño
             peer_ip = addr[0]
             self._expected_file_transfers[peer_ip] = {
                 "body_id": expected_file_id,
@@ -1016,7 +913,6 @@ class LCPPeer:
         )
 
         try:
-            # Recibir los primeros 8 bytes (File ID) según el protocolo LCP
             file_id_bytes = conn.recv(8)
             if len(file_id_bytes) < 8:
                 logger.error(
@@ -1033,7 +929,6 @@ class LCPPeer:
             file_id = int.from_bytes(file_id_bytes, "big")
             logger.info(f"{worker_name} recibió identificador de archivo: {file_id}")
 
-            # Verificar si tenemos una transferencia esperada desde esta IP y con este ID
             expected_transfer_info = None
             peer_id = None
 
@@ -1044,13 +939,11 @@ class LCPPeer:
                 ):
                     expected_transfer_info = self._expected_file_transfers[addr[0]]
 
-                # Buscar el peer_id correspondiente a esta IP
                 for user_id, (ip, _) in self.peers.items():
                     if ip == addr[0]:
                         peer_id = user_id
                         break
 
-            # Verificar que es una transferencia válida
             if not expected_transfer_info:
                 logger.warning(
                     f"{worker_name} no hay transferencia esperada desde IP {addr[0]}, rechazando conexión"
@@ -1063,7 +956,6 @@ class LCPPeer:
                 conn.close()
                 return
 
-            # Verificar que el ID del archivo coincide con el esperado
             if expected_transfer_info["body_id"] != file_id:
                 logger.warning(
                     f"{worker_name} ID de archivo incorrecto: esperado {expected_transfer_info['body_id']}, recibido {file_id}"
@@ -1090,7 +982,6 @@ class LCPPeer:
                 f"{worker_name} identificó peer como {peer_id} para la transferencia de archivo con ID {file_id}"
             )
 
-            # Crear archivo temporal con el formato lcp_file_<timestamp>_<peer_id>.dat
             timestamp = int(time.time())
             temp_file = f"lcp_file_{timestamp}_{peer_id}.dat"
             expected_size = expected_transfer_info["file_size"]
@@ -1106,11 +997,8 @@ class LCPPeer:
                         f"{worker_name} iniciando recepción de datos de archivo"
                     )
 
-                    # Recibir el contenido del archivo según el protocolo LCP
                     while bytes_recibidos < expected_size:
-                        # Calcular cuántos bytes quedan por recibir
                         bytes_restantes = expected_size - bytes_recibidos
-                        # Usar un tamaño de buffer adecuado (máximo 4096 bytes)
                         chunk_size = min(4096, bytes_restantes)
 
                         data = conn.recv(chunk_size)
@@ -1123,7 +1011,7 @@ class LCPPeer:
                         f.write(data)
                         bytes_recibidos += len(data)
 
-                        if bytes_recibidos % (1024 * 1024) < 4096:  # Log cada ~1MB
+                        if bytes_recibidos % (1024 * 1024) < 4096:
                             progress = (
                                 int((bytes_recibidos / expected_size) * 100)
                                 if expected_size > 0
@@ -1142,11 +1030,8 @@ class LCPPeer:
                 )
                 return
 
-            # Verificar que el archivo se recibió correctamente
             try:
                 received_size = os.path.getsize(temp_file)
-
-                # Verificar si el archivo recibido está completo
                 if received_size != expected_size:
                     logger.error(
                         f"{worker_name} tamaño de archivo incorrecto: esperado {expected_size}, recibido {received_size}"
@@ -1163,7 +1048,6 @@ class LCPPeer:
                     f"{worker_name} transferencia completa: {bytes_recibidos} bytes recibidos en {temp_file}"
                 )
 
-                # Limpiar la información de transferencia esperada
                 with self._peers_lock:
                     if (
                         hasattr(self, "_expected_file_transfers")
@@ -1171,14 +1055,12 @@ class LCPPeer:
                     ):
                         del self._expected_file_transfers[addr[0]]
 
-                # Notificar a los callbacks
                 logger.info(
                     f"{worker_name} notificando recepción de archivo a {len(self.file_callbacks)} callbacks"
                 )
                 for callback in self.file_callbacks:
                     callback(peer_id, temp_file)
 
-                # Enviar confirmación final (25 bytes) según el protocolo
                 logger.debug(
                     f"{worker_name} enviando confirmación de recepción exitosa a {peer_id}"
                 )
@@ -1222,9 +1104,7 @@ class LCPPeer:
     def _cleanup_conversation_locks(self):
         """Limpia locks de conversaciones antiguas"""
         with self._conversation_locks_lock:
-            # Mantener un máximo de 100 locks para evitar crecimiento indefinido
             if len(self._conversation_locks) > 100:
-                # Eliminar algunos locks aleatorios
                 keys_to_remove = random.sample(
                     list(self._conversation_locks.keys()),
                     len(self._conversation_locks) - 50,
@@ -1235,7 +1115,6 @@ class LCPPeer:
     def _message_worker(self):
         """Procesa mensajes de la cola"""
         worker_name = threading.current_thread().name
-        logger.info(f"Worker {worker_name} iniciado y listo para procesar mensajes")
 
         while True:
             try:
@@ -1277,7 +1156,6 @@ class LCPPeer:
     def _file_send_worker(self):
         """Procesa envíos de archivos de la cola"""
         worker_name = threading.current_thread().name
-        logger.info(f"Worker {worker_name} iniciado y listo para enviar archivos")
 
         while True:
             try:
@@ -1291,34 +1169,28 @@ class LCPPeer:
 
                 start_time = time.time()
 
-                # Verificar si podemos iniciar una nueva transferencia o debemos esperar
                 with self._transfers_lock:
                     if self.active_file_transfers >= self.max_concurrent_transfers:
                         logger.warning(
                             f"{worker_name} alcanzó límite de transferencias concurrentes ({self.max_concurrent_transfers})"
                         )
-                        # Volver a poner la tarea en la cola y esperar
                         self.file_send_queue.put(task)
-                        time.sleep(1)  # Esperar antes de intentar de nuevo
-                        self.file_send_queue.task_done()  # Marcar como completada la tarea actual
+                        time.sleep(1)
+                        self.file_send_queue.task_done()
                         continue
 
-                    # Incrementar contador de transferencias activas
                     self.active_file_transfers += 1
                     logger.info(
                         f"{worker_name} inicia transferencia ({self.active_file_transfers}/{self.max_concurrent_transfers} activas)"
                     )
 
                 try:
-                    # Intentar enviar el archivo
                     success = self._send_file(user_to, file_path)
 
-                    # Notificar el resultado
                     if success:
                         logger.info(
                             f"{worker_name} archivo enviado exitosamente a {user_to}"
                         )
-                        # Notificar a los callbacks de progreso que se completó
                         with self._callback_lock:
                             for callback in self.file_progress_callbacks:
                                 callback(
@@ -1328,7 +1200,6 @@ class LCPPeer:
                         logger.error(
                             f"{worker_name} error enviando archivo a {user_to}"
                         )
-                        # Notificar a los callbacks de progreso que falló
                         with self._callback_lock:
                             for callback in self.file_progress_callbacks:
                                 callback(
@@ -1336,7 +1207,6 @@ class LCPPeer:
                                 )  # -1 indica error
 
                 finally:
-                    # Siempre decrementar el contador de transferencias activas
                     with self._transfers_lock:
                         self.active_file_transfers -= 1
                         logger.info(
@@ -1356,196 +1226,159 @@ class LCPPeer:
                     f"{worker_name} listo para siguiente tarea. Cola: aprox. {self.file_send_queue.qsize()} pendientes"
                 )
 
-    def get_resource_stats(self):
-        """Devuelve estadísticas sobre recursos actuales y uso del sistema"""
-        # Obtener recursos disponibles actualizados
-        resources = get_available_resources()
-
-        stats = {
-            "mensaje_workers": {
-                "total": self.message_workers_count,
-                "recomendados": int(
-                    resources["cpu_count"]
-                    * 3.0
-                    * max(
-                        0.5,
-                        min(
-                            1.0,
-                            1.0
-                            - (resources["system_load"] / resources["cpu_count"] / 2),
-                        ),
-                    )
-                ),
-            },
-            "archivo_workers": {
-                "total": self.file_workers_count,
-                "recomendados": int(
-                    resources["cpu_count"]
-                    * 1.5
-                    * max(
-                        0.5,
-                        min(
-                            1.0,
-                            1.0
-                            - (resources["system_load"] / resources["cpu_count"] / 2),
-                        ),
-                    )
-                ),
-            },
-            "transferencias": {
-                "activas": self.active_file_transfers,
-                "max_permitidas": self.max_concurrent_transfers,
-                "porcentaje_uso": (
-                    round(
-                        (self.active_file_transfers / self.max_concurrent_transfers)
-                        * 100,
-                        1,
-                    )
-                    if self.max_concurrent_transfers > 0
-                    else 0
-                ),
-            },
-            "colas": {
-                "mensajes_pendientes": self.message_queue.qsize(),
-                "archivos_pendientes": self.file_send_queue.qsize(),
-            },
-            "peers": {
-                "conectados": len(self.peers),
-                "lista": list(self.peers.keys()),
-            },
-            "sistema": resources,
-        }
-
-        return stats
-
     def send_message(self, user_to, message):
         """Envía un mensaje a otro peer"""
         logger.info(f"Intentando enviar mensaje a '{user_to}': {message[:50]}...")
 
+        found_peer = None
+        peer_addr = None
+
         with self._peers_lock:
-            if user_to not in self.peers:
+            normalized_to = self._normalize_user_id(user_to)
+
+            for peer_id, (ip, _) in self.peers.items():
+                if self._normalize_user_id(peer_id) == normalized_to:
+                    found_peer = peer_id
+                    peer_addr = (ip, 9990)
+                    break
+
+            if not found_peer:
                 logger.error(
                     f"No se puede enviar mensaje: peer '{user_to}' no encontrado"
                 )
                 return False
-            peer_addr = (self.peers[user_to][0], 9990)
-            logger.info(f"Peer '{user_to}' encontrado en {peer_addr[0]}:{peer_addr[1]}")
 
-        message_id = int(time.time() * 1000) % 256  # BodyId único
+            logger.info(
+                f"Peer '{user_to}' encontrado como '{found_peer}' en {peer_addr[0]}:{peer_addr[1]}"
+            )
+
+        message_id = int(time.time() * 1000) % 256
         message_bytes = message.encode("utf-8")
-        expected_user_id = user_to.encode("utf-8").ljust(20)[:20]
+        expected_user_id = found_peer.encode("utf-8").ljust(20)[:20]
 
-        logger.info(
-            f"Enviando mensaje a {user_to} (message_id: {message_id}, tamaño: {len(message_bytes)} bytes)"
-        )
-
-        # Obtener o crear lock específico para este usuario
         with self._conversation_locks_lock:
-            if user_to not in self._conversation_locks:
+            if found_peer not in self._conversation_locks:
                 logger.debug(
-                    f"Creando nuevo lock de conversación para envío a {user_to}"
+                    f"Creando nuevo lock de conversación para envío a {found_peer}"
                 )
-                self._conversation_locks[user_to] = threading.Lock()
-            user_lock = self._conversation_locks[user_to]
+                self._conversation_locks[found_peer] = threading.Lock()
+            user_lock = self._conversation_locks[found_peer]
 
-        # Usar el lock específico para conversaciones con este usuario
         with user_lock:
-            logger.debug(f"Adquirido lock de conversación para envío a {user_to}")
-            try:
-                # Fase 1: Enviar header
-                header = self._build_header(
-                    user_to, MESSAGE, message_id, len(message_bytes)
-                )
-                logger.info(
-                    f"FASE 1: Enviando header LCP a {peer_addr[0]}:{peer_addr[1]}"
+            logger.debug(f"Adquirido lock de conversación para envío a {found_peer}")
+            with socket.socket(
+                socket.AF_INET, socket.SOCK_DGRAM
+            ) as conversation_socket:
+                conversation_socket.bind(("0.0.0.0", 0))
+                conversation_socket.settimeout(5)
+                local_port = conversation_socket.getsockname()[1]
+                logger.debug(
+                    f"Socket temporal creado en puerto {local_port} para conversación con {found_peer}"
                 )
 
-                with self._udp_socket_lock:
-                    self.udp_socket.sendto(header, peer_addr)
+                try:
+                    # Fase 1: Enviar header
+                    header = self._build_header(
+                        found_peer, MESSAGE, message_id, len(message_bytes)
+                    )
+                    logger.info(
+                        f"FASE 1: Enviando header LCP a {peer_addr[0]}:{peer_addr[1]} desde puerto {local_port}"
+                    )
+
+                    conversation_socket.sendto(header, peer_addr)
                     logger.debug(f"Header enviado, esperando respuesta (timeout: 5s)")
-                    self.udp_socket.settimeout(5)
-                    resp_data, resp_addr = self.udp_socket.recvfrom(25)
+
+                    resp_data, resp_addr = conversation_socket.recvfrom(25)
                     logger.debug(
                         f"Respuesta recibida desde {resp_addr[0]}:{resp_addr[1]} ({len(resp_data)} bytes)"
                     )
 
-                # Verificar identidad
-                if resp_addr[0] != peer_addr[0] or resp_data[1:21] != expected_user_id:
-                    logger.warning(
-                        f"Identidad no verificada en respuesta. Esperada: {user_to}, IP: {peer_addr[0]}"
+                    if resp_data[0] != 0:
+                        logger.error(
+                            f"Respuesta negativa recibida: status={resp_data[0]}"
+                        )
+                        return False
+
+                    logger.info(f"FASE 1 completada: header aceptado por {found_peer}")
+
+                    # Fase 2: Enviar cuerpo del mensaje
+                    body = message_id.to_bytes(8, "big") + message_bytes
+                    logger.info(
+                        f"FASE 2: Enviando cuerpo del mensaje a {peer_addr[0]}:{peer_addr[1]} ({len(body)} bytes) desde puerto {local_port}"
                     )
-                    return False
 
-                if resp_data[0] != 0:  # ResponseStatus != OK
-                    logger.error(f"Respuesta negativa recibida: status={resp_data[0]}")
-                    return False
-
-                logger.info(f"FASE 1 completada: header aceptado por {user_to}")
-
-                # Fase 2: Enviar cuerpo del mensaje
-                body = message_id.to_bytes(8, "big") + message_bytes
-                logger.info(
-                    f"FASE 2: Enviando cuerpo del mensaje a {peer_addr[0]}:{peer_addr[1]} ({len(body)} bytes)"
-                )
-
-                with self._udp_socket_lock:
-                    self.udp_socket.sendto(body, peer_addr)
+                    conversation_socket.sendto(body, peer_addr)
                     logger.debug(
                         f"Cuerpo enviado, esperando confirmación final (timeout: 5s)"
                     )
-                    resp_data, resp_addr = self.udp_socket.recvfrom(25)
+
+                    resp_data, resp_addr = conversation_socket.recvfrom(25)
                     logger.debug(
                         f"Confirmación recibida desde {resp_addr[0]}:{resp_addr[1]}"
                     )
 
-                # Verificar nuevamente identidad
-                if resp_addr[0] != peer_addr[0] or resp_data[1:21] != expected_user_id:
-                    logger.warning(f"Identidad no verificada en confirmación final")
+                    if resp_data[0] == 0:
+                        logger.info(
+                            f"FASE 2 completada: mensaje entregado exitosamente a {found_peer}"
+                        )
+                    else:
+                        logger.error(
+                            f"Error en confirmación final: status={resp_data[0]}"
+                        )
+
+                    return resp_data[0] == 0
+
+                except socket.timeout:
+                    logger.error(f"Timeout esperando respuesta de {found_peer}")
                     return False
-
-                if resp_data[0] == 0:
-                    logger.info(
-                        f"FASE 2 completada: mensaje entregado exitosamente a {user_to}"
+                except Exception as e:
+                    logger.error(
+                        f"Error enviando mensaje a {found_peer}: {e}", exc_info=True
                     )
-                else:
-                    logger.error(f"Error en confirmación final: status={resp_data[0]}")
-
-                return resp_data[0] == 0
-
-            except socket.timeout:
-                logger.error(f"Timeout esperando respuesta de {user_to}")
-                return False
-            except Exception as e:
-                logger.error(f"Error enviando mensaje a {user_to}: {e}", exc_info=True)
-                return False
-            finally:
-                self.udp_socket.settimeout(None)
-                logger.debug(f"Socket UDP restaurado a modo no bloqueante")
+                    return False
 
     def send_file(self, user_to, file_path):
         """Envía un archivo a otro peer"""
         logger.info(f"Intentando enviar archivo '{file_path}' a '{user_to}'")
 
-        if user_to not in self.peers:
+        found_peer = None
+        with self._peers_lock:
+            normalized_to = self._normalize_user_id(user_to)
+
+            for peer_id in self.peers:
+                if self._normalize_user_id(peer_id) == normalized_to:
+                    found_peer = peer_id
+                    break
+
+        if not found_peer:
             logger.error(f"No se puede enviar archivo: peer '{user_to}' no encontrado")
             return False
+
+        logger.info(f"Peer '{user_to}' encontrado como '{found_peer}'")
 
         if not os.path.exists(file_path):
             logger.error(f"No se puede enviar archivo: '{file_path}' no existe")
             return False
 
-        self.file_send_queue.put({"user_to": user_to, "file_path": file_path})
+        self.file_send_queue.put({"user_to": found_peer, "file_path": file_path})
         logger.info(f"Archivo '{file_path}' añadido a la cola de envío")
         return True
 
     def _send_file(self, user_to, file_path):
         """Realiza el envío de un archivo a otro peer"""
-        file_id = int(time.time() * 1000) % 256  # BodyId único
+        file_id = int(time.time() * 1000) % 256
         file_size = os.path.getsize(file_path)
-        peer_addr = (self.peers[user_to][0], 9990)
+
+        with self._peers_lock:
+            if user_to not in self.peers:
+                logger.error(
+                    f"No se puede enviar archivo: peer '{user_to}' no encontrado en el momento de envío"
+                )
+                return False
+            peer_addr = (self.peers[user_to][0], 9990)
+
         worker_name = threading.current_thread().name
 
-        # Notificar inicio de transferencia
         with self._callback_lock:
             for callback in self.file_progress_callbacks:
                 callback(user_to, file_path, 0, "iniciando")
@@ -1555,7 +1388,7 @@ class LCPPeer:
         )
 
         try:
-            # Fase 1: Enviar header por UDP
+            # Fase 1: Enviar header
             header = self._build_header(user_to, 2, file_id, file_size)
             logger.info(
                 f"{worker_name} FASE 1: Enviando header de archivo a {peer_addr[0]}:{peer_addr[1]}"
@@ -1563,12 +1396,16 @@ class LCPPeer:
             with self._udp_socket_lock:
                 self.udp_socket.sendto(header, peer_addr)
 
-                # Esperar confirmación de header
                 logger.debug(
                     f"{worker_name} Header enviado, esperando confirmación (timeout: 5s)"
                 )
                 self.udp_socket.settimeout(5)
-                resp_data, resp_addr = self.udp_socket.recvfrom(25)
+                try:
+                    resp_data, resp_addr = self.udp_socket.recvfrom(25)
+                    self.udp_socket.settimeout(None)
+                except Exception as e:
+                    self.udp_socket.settimeout(None)
+                    raise e
 
             if resp_data[0] != 0:
                 logger.error(
@@ -1588,7 +1425,7 @@ class LCPPeer:
                 logger.debug(
                     f"{worker_name} Conectando a {peer_addr[0]}:{peer_addr[1]} para transferencia de archivo"
                 )
-                s.connect((self.peers[user_to][0], 9990))
+                s.connect(peer_addr)
 
                 # Enviar identificador de archivo
                 logger.debug(
@@ -1611,11 +1448,9 @@ class LCPPeer:
                         s.send(chunk)
                         bytes_enviados += len(chunk)
 
-                        # Calcular y reportar progreso en intervalos
-                        if file_size > 0:  # Evitar división por cero
+                        if file_size > 0:
                             progress = min(100, int((bytes_enviados * 100) / file_size))
 
-                            # Actualizar progreso cada 5% o cuando alcance 1MB más
                             if (progress - last_progress_update >= 5) or (
                                 bytes_enviados % (1024 * 1024) < 4096
                             ):
@@ -1623,7 +1458,6 @@ class LCPPeer:
                                 logger.info(
                                     f"{worker_name} Progreso: {bytes_enviados/1024:.1f} KB ({progress}%) enviados a {user_to}"
                                 )
-                                # Notificar a los callbacks de progreso
                                 with self._callback_lock:
                                     for callback in self.file_progress_callbacks:
                                         callback(
@@ -1634,7 +1468,6 @@ class LCPPeer:
                     f"{worker_name} Transferencia completa: {bytes_enviados} bytes enviados a {user_to}"
                 )
 
-                # Esperar confirmación final
                 logger.debug(
                     f"{worker_name} Esperando confirmación final de transferencia"
                 )
@@ -1677,7 +1510,7 @@ class LCPPeer:
             bool: True si el mensaje fue enviado, False en caso de error
         """
         logger.info(f"Iniciando envío de mensaje broadcast: {message[:50]}...")
-        message_id = int(time.time() * 1000) % 256  # BodyId único
+        message_id = int(time.time() * 1000) % 256
         message_bytes = message.encode("utf-8")
 
         logger.info(
@@ -1689,7 +1522,6 @@ class LCPPeer:
             header = self._build_header(None, MESSAGE, message_id, len(message_bytes))
             logger.info("FASE 1: Enviando header LCP broadcast")
 
-            # Enviamos a todas las interfaces de broadcast
             broadcast_addresses = get_network_info()
             success = False
 
@@ -1734,7 +1566,6 @@ class LCPPeer:
             logger.error(f"Error enviando mensaje broadcast: {e}", exc_info=True)
             return False
         finally:
-            # Asegurarse de que el socket vuelve a modo no bloqueante
             self.udp_socket.settimeout(None)
 
     def register_message_callback(self, callback):
@@ -1761,17 +1592,12 @@ class LCPPeer:
 
     def get_peers(self):
         """Devuelve la lista de pares conocidos"""
-        # Normalizar las claves para eliminar duplicados con espacios diferentes
         unique_peers = set()
         with self._peers_lock:
-            # Obtener una versión normalizada de nuestro ID para comparación
             my_normalized_id = self._normalize_user_id(self.user_id_str)
 
             for peer_id in self.peers.keys():
-                # Normalizar el ID del peer para comparaciones consistentes
                 normalized_id = self._normalize_user_id(peer_id)
-
-                # Ignorar nuestro propio ID
                 if normalized_id != my_normalized_id:
                     unique_peers.add(normalized_id)
 
@@ -1786,7 +1612,9 @@ class LCPPeer:
         Returns:
             String con el ID normalizado (sin espacios en los extremos)
         """
-        # Eliminar espacios al inicio y final, y caracteres nulos
+        if not user_id:
+            return ""
+
         return user_id.strip().rstrip("\x00")
 
     def _ensure_20_bytes_id(self, user_id):
@@ -1798,20 +1626,14 @@ class LCPPeer:
         Returns:
             Tuple[str, bytes]: (ID procesado como string, ID procesado como bytes)
         """
-        # Limpiar el ID primero
         clean_id = self._normalize_user_id(user_id)
 
-        # Convertir a bytes para verificar la longitud exacta
         id_bytes = clean_id.encode("utf-8")
 
         if len(id_bytes) < 20:
-            # Si tiene menos de 20 bytes, rellenar con espacios
             result_str = clean_id.ljust(20)[:20]
             result_bytes = result_str.encode("utf-8")
-
-            # Verificar que el resultado tenga exactamente 20 bytes
             if len(result_bytes) > 20:
-                # Si aún excede 20 bytes, truncar con cuidado
                 result_bytes = result_bytes[:20]
                 while True:
                     try:
@@ -1827,14 +1649,11 @@ class LCPPeer:
                             break
 
         elif len(id_bytes) > 20:
-            # Si tiene más de 20 bytes, truncar a 20 bytes exactos
             result_bytes = id_bytes[:20]
 
-            # Verificar que no hayamos cortado un carácter a la mitad
             try:
                 result_str = result_bytes.decode("utf-8")
             except UnicodeDecodeError:
-                # Seguir truncando hasta tener un UTF-8 válido
                 while True:
                     result_bytes = result_bytes[:-1]
                     try:
@@ -1848,13 +1667,11 @@ class LCPPeer:
                             ]
                             break
 
-            # Si después de truncar quedó con menos de 20 bytes, rellenar con espacios
             if len(result_bytes) < 20:
                 padding = b" " * (20 - len(result_bytes))
                 result_bytes = result_bytes + padding
                 result_str = result_bytes.decode("utf-8")
         else:
-            # Ya tiene exactamente 20 bytes
             result_str = clean_id
             result_bytes = id_bytes
 
@@ -1873,20 +1690,9 @@ class LCPPeer:
         """
         elapsed = time.time() - start_time
 
-        # Según la especificación, todas las operaciones excepto transferencia
-        # de archivos deben responder en máximo 5 segundos
         if not file_transfer and elapsed > 5:
             logger.warning(
                 f"Operación {operation_type} excedió el límite de 5 segundos: {elapsed:.2f}s"
-            )
-            return True
-
-        # Para transferencias de archivos, usamos un límite más generoso basado en el tamaño
-        if (
-            file_transfer and elapsed > 120
-        ):  # 2 minutos como máximo para cualquier transferencia
-            logger.warning(
-                f"Transferencia de archivo excedió el límite de tiempo: {elapsed:.2f}s"
             )
             return True
 
@@ -1989,50 +1795,6 @@ if __name__ == "__main__":
                 elif cmd == "list":
                     print("Pares conocidos:")
                     print("\n".join(peer.get_peers()) or "Ninguno")
-
-                elif cmd == "stats":
-                    stats = peer.get_resource_stats()
-                    print("\n=== Estadísticas del Sistema ===")
-
-                    # Información del sistema
-                    print("\n[Sistema]")
-                    print(f"Sistema Operativo: {stats['sistema']['platform']}")
-                    print(f"CPUs lógicas: {stats['sistema']['cpu_count']}")
-                    print(f"Memoria total: {stats['sistema']['memory_gb']:.2f} GB")
-                    print(
-                        f"Memoria disponible: {stats['sistema']['memory_available_gb']:.2f} GB ({(stats['sistema']['memory_available_gb']/stats['sistema']['memory_gb']*100):.1f}%)"
-                    )
-                    print(f"Carga del sistema: {stats['sistema']['system_load']:.2f}")
-
-                    # Workers y colas
-                    print("\n[Workers]")
-                    print(
-                        f"Workers para mensajes: {stats['mensaje_workers']['total']} (óptimo según carga actual: {stats['mensaje_workers']['recomendados']})"
-                    )
-                    print(
-                        f"Workers para archivos: {stats['archivo_workers']['total']} (óptimo según carga actual: {stats['archivo_workers']['recomendados']})"
-                    )
-
-                    # Transferencias activas
-                    print("\n[Transferencias]")
-                    print(f"Activas: {stats['transferencias']['activas']}")
-                    print(f"Límite: {stats['transferencias']['max_permitidas']}")
-                    print(f"Uso: {stats['transferencias']['porcentaje_uso']}%")
-
-                    # Estado de las colas
-                    print("\n[Colas]")
-                    print(
-                        f"Mensajes pendientes: {stats['colas']['mensajes_pendientes']}"
-                    )
-                    print(
-                        f"Archivos pendientes: {stats['colas']['archivos_pendientes']}"
-                    )
-
-                    # Peers conectados
-                    print("\n[Peers]")
-                    print(f"Conectados: {stats['peers']['conectados']}")
-                    if stats["peers"]["conectados"] > 0:
-                        print("Lista: " + ", ".join(stats["peers"]["lista"]))
 
                 elif cmd == "exit":
                     break

@@ -30,7 +30,6 @@ class LCPChat(tk.Tk):
         self.style.configure("TButton", font=("Arial", 11), padding=6)
 
         n, _, _ = get_optimal_thread_count()
-        print(n)
         self.thread_pool = concurrent.futures.ThreadPoolExecutor(
             max_workers=n, thread_name_prefix="GUI-Worker"
         )
@@ -245,19 +244,49 @@ class LCPChat(tk.Tk):
 
     def append_to_chat(self, user_id, message):
         """Añade un mensaje al historial y lo muestra si es el chat actual"""
-        timestamp = time.strftime("%H:%M:%S")
-        formatted_msg = f"[{timestamp}] {user_id}: {message}"
+        try:
+            timestamp = time.strftime("%H:%M:%S")
 
-        if user_id not in self.chat_history:
-            self.chat_history[user_id] = []
+            # Formateamos el mensaje de manera distinta según quién lo envía
+            if user_id == "Tú":
+                formatted_msg = f"[{timestamp}] {user_id}: {message}"
+            elif user_id == "Sistema":
+                formatted_msg = f"[{timestamp}] 🔔 {user_id}: {message}"
+            else:
+                # Destacamos los mensajes recibidos
+                formatted_msg = f"[{timestamp}] ➤ {user_id}: {message}"
+                # También podríamos añadir un color diferente si fuera posible
 
-        self.chat_history[user_id].append(formatted_msg)
+            if user_id not in self.chat_history:
+                self.chat_history[user_id] = []
+                logger.info(f"Creado nuevo historial para {user_id}")
 
-        if self.current_chat == user_id or user_id == "Sistema":
-            self.chat_display.configure(state="normal")
-            self.chat_display.insert(tk.END, f"{formatted_msg}\n")
-            self.chat_display.configure(state="disabled")
-            self.chat_display.see(tk.END)
+            self.chat_history[user_id].append(formatted_msg)
+
+            # Si es el chat actual o un mensaje del sistema, lo mostramos
+            if self.current_chat == user_id or user_id == "Sistema":
+                self.chat_display.configure(state="normal")
+                self.chat_display.insert(tk.END, f"{formatted_msg}\n")
+                self.chat_display.configure(state="disabled")
+                self.chat_display.see(tk.END)
+
+                # Notificar visualmente que hay un mensaje nuevo
+                if user_id != "Tú" and user_id != "Sistema":
+                    self.status_var.set(f"✉️ Mensaje nuevo de {user_id}")
+            else:
+                # Si no es el chat actual, notificar que hay mensajes pendientes
+                if user_id != "Sistema":
+                    self.status_var.set(f"✉️ Mensaje nuevo sin leer de {user_id}")
+                    logger.info(
+                        f"Mensaje pendiente de {user_id} (chat actual: {self.current_chat})"
+                    )
+                    # Aquí podríamos actualizar la UI para mostrar un indicador de mensajes no leídos
+
+            logger.debug(
+                f"Mensaje añadido al historial de {user_id}: {message[:30]}..."
+            )
+        except Exception as e:
+            logger.error(f"Error añadiendo mensaje al chat: {e}", exc_info=True)
 
     def send_message(self, event=None):
         """Envía un mensaje al usuario seleccionado"""
@@ -427,7 +456,26 @@ class LCPChat(tk.Tk):
 
     def on_message(self, user_from, message):
         """Callback para mensajes recibidos"""
-        self.append_to_chat(user_from, message)
+        logger.info(f"MENSAJE RECIBIDO de {user_from}: {message[:50]}...")
+
+        # Notificar con efecto visual además de agregar al chat
+        try:
+            self.status_var.set(f"✉️ Nuevo mensaje de {user_from}")
+            # Usar el queue para actualizar la UI desde el hilo principal
+            self.update_queue.put(
+                lambda u=user_from, m=message: self.append_to_chat(u, m)
+            )
+
+            # Si es un mensaje para el chat actual, reproducir un sonido o parpadear (si estuviera implementado)
+            if user_from == self.current_chat:
+                # Aquí se podría implementar un indicador visual más notorio
+                pass
+
+            logger.info(f"Mensaje de {user_from} procesado correctamente")
+        except Exception as e:
+            logger.error(
+                f"Error procesando mensaje recibido de {user_from}: {e}", exc_info=True
+            )
 
     def on_file(self, user_from, file_path):
         """Callback para archivos recibidos"""

@@ -1,8 +1,3 @@
-"""
-System information and resource detection module .
-Handles detection of available resources like CPU, memory, and optimum thread counts.
-"""
-
 import logging
 import platform
 import multiprocessing

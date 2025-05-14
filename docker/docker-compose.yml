@@ -33,7 +33,16 @@ services:
       - lcp-net
     volumes:
       - ./received_files_3:/app/received_files
-
+  lcp-node-4:
+    build: .
+    container_name: lcp-node-4
+    tty: true
+    stdin_open: true
+    command: main.py "Usuario4"
+    networks:
+      - lcp-net
+    volumes:
+      - ./received_files_4:/app/received_files
 networks:
   lcp-net:
     driver: bridge

@@ -1,8 +1,3 @@
-"""
-Network utilities module for LCP protocol.
-Handles network interfaces discovery, broadcast addresses and other network-related operations.
-"""
-
 import logging
 import platform
 import subprocess
@@ -124,7 +119,6 @@ def get_network_info():
         logger.error(f"Error obteniendo información de red: {e}")
         broadcast_addresses.append("255.255.255.255")
 
-    # Eliminar duplicados
     broadcast_addresses = list(set(broadcast_addresses))
     logger.info(f"Direcciones de broadcast detectadas: {broadcast_addresses}")
     return broadcast_addresses
