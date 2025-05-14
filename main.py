@@ -867,7 +867,7 @@ class LCPPeer:
             return
 
         file_size = header["body_length"]
-        if file_size <= 0 or file_size > (1024 * 1024 * 1024):
+        if file_size <= 0:
             with self._udp_socket_lock:
                 logger.warning(
                     f"{worker_name} rechazando archivo de tamaño inválido: {file_size} bytes"
@@ -899,8 +899,6 @@ class LCPPeer:
             logger.info(
                 f"{worker_name} aceptando solicitud de archivo de {user_from}, tamaño: {file_size} bytes, ID: {expected_file_id}"
             )
-            self._send_response(addr, RESPONSE_OK)
-
         logger.info(
             f"{worker_name} esperando conexión TCP de {user_from} para transferencia de archivo con ID {expected_file_id}"
         )
@@ -1395,23 +1393,6 @@ class LCPPeer:
             )
             with self._udp_socket_lock:
                 self.udp_socket.sendto(header, peer_addr)
-
-                logger.debug(
-                    f"{worker_name} Header enviado, esperando confirmación (timeout: 5s)"
-                )
-                self.udp_socket.settimeout(5)
-                try:
-                    resp_data, resp_addr = self.udp_socket.recvfrom(25)
-                    self.udp_socket.settimeout(None)
-                except Exception as e:
-                    self.udp_socket.settimeout(None)
-                    raise e
-
-            if resp_data[0] != 0:
-                logger.error(
-                    f"{worker_name} Confirmación de header rechazada: status={resp_data[0]}"
-                )
-                return False
 
             logger.info(
                 f"{worker_name} FASE 1 completada: header de archivo aceptado por {user_to}"
