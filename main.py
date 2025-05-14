@@ -469,6 +469,7 @@ class LCPPeer:
                         f"Recibida respuesta de protocolo de 25 bytes desde {addr[0]}:{addr[1]} data: {data}"
                     )
                 else:
+                    print(data)
                     logger.warning(
                         f"Recibido mensaje UDP malformado desde {addr[0]}:{addr[1]} (tamaño: {len(data)} bytes)"
                     )
@@ -1340,19 +1341,24 @@ class LCPPeer:
         logger.info(f"Intentando enviar archivo '{file_path}' a '{user_to}'")
 
         found_peer = None
+        peer_addr = None
+
         with self._peers_lock:
             normalized_to = self._normalize_user_id(user_to)
 
-            for peer_id in self.peers:
+            for peer_id, (ip, _) in self.peers.items():
                 if self._normalize_user_id(peer_id) == normalized_to:
                     found_peer = peer_id
+                    peer_addr = (ip, UDP_PORT)
                     break
 
         if not found_peer:
             logger.error(f"No se puede enviar archivo: peer '{user_to}' no encontrado")
             return False
 
-        logger.info(f"Peer '{user_to}' encontrado como '{found_peer}'")
+        logger.info(
+            f"Peer '{user_to}' encontrado como '{found_peer}' en {peer_addr[0]}:{peer_addr[1]}"
+        )
 
         if not os.path.exists(file_path):
             logger.error(f"No se puede enviar archivo: '{file_path}' no existe")
@@ -1367,13 +1373,23 @@ class LCPPeer:
         file_id = int(time.time() * 1000) % 256
         file_size = os.path.getsize(file_path)
 
+        found_peer = None
+        peer_addr = None
+
         with self._peers_lock:
-            if self._normalize_user_id(user_to) not in self.peers:
-                logger.error(
-                    f"No se puede enviar archivo: peer '{user_to}' no encontrado en el momento de envío"
-                )
-                return False
-            peer_addr = (self.peers[self._normalize_user_id(user_to)][0], 9990)
+            normalized_to = self._normalize_user_id(user_to)
+
+            for peer_id, (ip, _) in self.peers.items():
+                if self._normalize_user_id(peer_id) == normalized_to:
+                    found_peer = peer_id
+                    peer_addr = (ip, UDP_PORT)
+                    break
+
+        if not found_peer or not peer_addr:
+            logger.error(
+                f"No se puede enviar archivo: peer '{user_to}' no encontrado en el momento de envío"
+            )
+            return False
 
         worker_name = threading.current_thread().name
 
@@ -1387,7 +1403,7 @@ class LCPPeer:
 
         try:
             # Fase 1: Enviar header
-            header = self._build_header(user_to, 2, file_id, file_size)
+            header = self._build_header(found_peer, 2, file_id, file_size)
             logger.info(
                 f"{worker_name} FASE 1: Enviando header de archivo a {peer_addr[0]}:{peer_addr[1]}"
             )
@@ -1395,7 +1411,7 @@ class LCPPeer:
                 self.udp_socket.sendto(header, peer_addr)
 
             logger.info(
-                f"{worker_name} FASE 1 completada: header de archivo aceptado por {user_to}"
+                f"{worker_name} FASE 1 completada: header de archivo aceptado por {found_peer}"
             )
 
             # Fase 2: Enviar archivo por TCP
@@ -1437,16 +1453,16 @@ class LCPPeer:
                             ):
                                 last_progress_update = progress
                                 logger.info(
-                                    f"{worker_name} Progreso: {bytes_enviados/1024:.1f} KB ({progress}%) enviados a {user_to}"
+                                    f"{worker_name} Progreso: {bytes_enviados/1024:.1f} KB ({progress}%) enviados a {found_peer}"
                                 )
                                 with self._callback_lock:
                                     for callback in self.file_progress_callbacks:
                                         callback(
-                                            user_to, file_path, progress, "progreso"
+                                            found_peer, file_path, progress, "progreso"
                                         )
 
                 logger.info(
-                    f"{worker_name} Transferencia completa: {bytes_enviados} bytes enviados a {user_to}"
+                    f"{worker_name} Transferencia completa: {bytes_enviados} bytes enviados a {found_peer}"
                 )
 
                 logger.debug(
@@ -1456,8 +1472,11 @@ class LCPPeer:
 
                 if resp_data[0] == 0:
                     logger.info(
-                        f"{worker_name} FASE 2 completada: archivo entregado exitosamente a {user_to}"
+                        f"{worker_name} FASE 2 completada: archivo entregado exitosamente a {found_peer}"
                     )
+                    with self._callback_lock:
+                        for callback in self.file_progress_callbacks:
+                            callback(found_peer, file_path, 100, "completado")
                     return True
                 else:
                     logger.error(
@@ -1466,15 +1485,25 @@ class LCPPeer:
                     return False
 
         except socket.timeout:
-            logger.error(f"{worker_name} Timeout esperando respuesta de {user_to}")
+            logger.error(f"{worker_name} Timeout esperando respuesta de {found_peer}")
+            with self._callback_lock:
+                for callback in self.file_progress_callbacks:
+                    callback(found_peer, file_path, 0, "error")
             return False
         except ConnectionError as e:
-            logger.error(f"{worker_name} Error de conexión con {user_to}: {e}")
+            logger.error(f"{worker_name} Error de conexión con {found_peer}: {e}")
+            with self._callback_lock:
+                for callback in self.file_progress_callbacks:
+                    callback(found_peer, file_path, 0, "error")
             return False
         except Exception as e:
             logger.error(
-                f"{worker_name} Error enviando archivo a {user_to}: {e}", exc_info=True
+                f"{worker_name} Error enviando archivo a {found_peer}: {e}",
+                exc_info=True,
             )
+            with self._callback_lock:
+                for callback in self.file_progress_callbacks:
+                    callback(found_peer, file_path, 0, "error")
             return False
         finally:
             self.udp_socket.settimeout(None)
