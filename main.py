@@ -997,7 +997,7 @@ class LCPPeer:
 
                     while bytes_recibidos < expected_size:
                         bytes_restantes = expected_size - bytes_recibidos
-                        chunk_size = min(4096, bytes_restantes)
+                        chunk_size = bytes_restantes
 
                         data = conn.recv(chunk_size)
                         if not data:
@@ -1368,12 +1368,12 @@ class LCPPeer:
         file_size = os.path.getsize(file_path)
 
         with self._peers_lock:
-            if user_to not in self.peers:
+            if self._normalize_user_id(user_to) not in self.peers:
                 logger.error(
                     f"No se puede enviar archivo: peer '{user_to}' no encontrado en el momento de envío"
                 )
                 return False
-            peer_addr = (self.peers[user_to][0], 9990)
+            peer_addr = (self.peers[self._normalize_user_id(user_to)][0], 9990)
 
         worker_name = threading.current_thread().name
 
