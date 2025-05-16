@@ -1,10 +1,9 @@
 import tkinter as tk
-from tkinter import ttk, scrolledtext, filedialog, simpledialog, font
-import threading
+from tkinter import ttk, scrolledtext, filedialog, simpledialog
 import time
 import os
 from protocol import *
-from main import LCPPeer
+from main import Peer
 import logging
 import concurrent.futures
 import queue
@@ -38,7 +37,7 @@ class LCPChat(tk.Tk):
 
         username = self.get_username()
 
-        self.peer = LCPPeer(username)
+        self.peer = Peer(username)
 
         self.peer.register_message_callback(self.on_message)
         self.peer.register_file_callback(self.on_file)
@@ -197,7 +196,6 @@ class LCPChat(tk.Tk):
 
     def refresh_users(self):
         """Actualiza la lista de usuarios conectados"""
-        # Obtener la lista de peers y filtrar los que tienen nombre vacío
         all_peers = self.peer.get_peers()
         peers = [peer_id for peer_id in all_peers if peer_id.strip() != ""]
 
@@ -233,8 +231,6 @@ class LCPChat(tk.Tk):
         selected_user = self.users_list.get(selected_idx)
 
         self.current_chat = selected_user
-
-        # Usar la cola de actualización para evitar bloquear la interfaz
         self.update_queue.put(lambda u=selected_user: self.display_chat_history(u))
 
     def display_chat_history(self, user_id):
@@ -244,17 +240,13 @@ class LCPChat(tk.Tk):
             self.chat_display.delete(1.0, tk.END)
 
             if user_id in self.chat_history:
-                # Insertamos todos los mensajes de una vez para mayor eficiencia
                 history_text = "\n".join(self.chat_history[user_id]) + "\n"
                 self.chat_display.insert(tk.END, history_text)
 
             self.chat_display.configure(state="disabled")
             self.chat_display.see(tk.END)
 
-            # Actualizar la barra de estado
             self.status_var.set(f"Chat con: {user_id}")
-
-            # Marcar como leídos los mensajes
             if user_id != "Sistema" and user_id != "Broadcast" and user_id != "Tú":
                 logger.info(f"Mensajes de {user_id} marcados como leídos")
         except Exception as e:
@@ -270,56 +262,45 @@ class LCPChat(tk.Tk):
         """
         try:
             timestamp = time.strftime("%H:%M:%S")
-
-            # Formateamos el mensaje de manera distinta según quién lo envía
             if user_id == "Tú":
                 formatted_msg = f"[{timestamp}] {user_id}: {message}"
             elif user_id == "Sistema":
                 formatted_msg = f"[{timestamp}] 🔔 {user_id}: {message}"
             else:
-                # Destacamos los mensajes recibidos
                 formatted_msg = f"[{timestamp}] ➤ {user_id}: {message}"
-                # También podríamos añadir un color diferente si fuera posible
 
-            # Si es un mensaje que yo envié a otro usuario, lo agregamos al historial de ese usuario
             if chat_id:
                 if chat_id not in self.chat_history:
                     self.chat_history[chat_id] = []
                     logger.info(f"Creado nuevo historial para {chat_id}")
                 self.chat_history[chat_id].append(formatted_msg)
 
-                # Si estamos viendo ese chat, mostrarlo en pantalla
                 if self.current_chat == chat_id:
                     self.chat_display.configure(state="normal")
                     self.chat_display.insert(tk.END, f"{formatted_msg}\n")
                     self.chat_display.configure(state="disabled")
                     self.chat_display.see(tk.END)
 
-            # También registramos en el historial del emisor (como antes)
             if user_id not in self.chat_history:
                 self.chat_history[user_id] = []
                 logger.info(f"Creado nuevo historial para {user_id}")
 
             self.chat_history[user_id].append(formatted_msg)
 
-            # Si es el chat actual o un mensaje del sistema, lo mostramos
             if self.current_chat == user_id or user_id == "Sistema":
                 self.chat_display.configure(state="normal")
                 self.chat_display.insert(tk.END, f"{formatted_msg}\n")
                 self.chat_display.configure(state="disabled")
                 self.chat_display.see(tk.END)
 
-                # Notificar visualmente que hay un mensaje nuevo
                 if user_id != "Tú" and user_id != "Sistema":
                     self.status_var.set(f"✉️ Mensaje nuevo de {user_id}")
             else:
-                # Si no es el chat actual, notificar que hay mensajes pendientes
                 if user_id != "Sistema" and user_id != "Tú":
                     self.status_var.set(f"✉️ Mensaje nuevo sin leer de {user_id}")
                     logger.info(
                         f"Mensaje pendiente de {user_id} (chat actual: {self.current_chat})"
                     )
-                    # Aquí podríamos actualizar la UI para mostrar un indicador de mensajes no leídos
 
             logger.debug(
                 f"Mensaje añadido al historial de {user_id}: {message[:30]}..."
@@ -335,7 +316,6 @@ class LCPChat(tk.Tk):
             )
             return
 
-        # Verificar que el usuario no tenga un nombre vacío
         if self.current_chat.strip() == "":
             self.append_to_chat(
                 "Sistema",
@@ -360,8 +340,6 @@ class LCPChat(tk.Tk):
             success = self.peer.send_message(user_to, message)
 
             if success:
-                # Añadir el mensaje al historial del usuario destinatario para mostrar
-                # tanto los mensajes enviados como recibidos en el mismo chat
                 self.update_queue.put(
                     lambda: self.append_to_chat("Tú", message, user_to)
                 )
@@ -400,25 +378,21 @@ class LCPChat(tk.Tk):
         timestamp = time.strftime("%H:%M:%S")
         broadcast_msg = f"[{timestamp}] Tú (Broadcast): {message}"
 
-        # Registrar en historial de "Broadcast"
         if "Broadcast" not in self.chat_history:
             self.chat_history["Broadcast"] = []
         self.chat_history["Broadcast"].append(broadcast_msg)
 
-        # También registrar en los historiales individuales de cada destinatario
         peers = self.peer.get_peers()
         for peer_id in peers:
             if peer_id not in self.chat_history:
                 self.chat_history[peer_id] = []
             self.chat_history[peer_id].append(broadcast_msg)
 
-        # Mostrar en pantalla si estamos en chat Broadcast o Sistema
         if self.current_chat == "Broadcast" or self.current_chat == "Sistema":
             self.chat_display.configure(state="normal")
             self.chat_display.insert(tk.END, f"{broadcast_msg}\n")
             self.chat_display.configure(state="disabled")
             self.chat_display.see(tk.END)
-        # O en el chat de un usuario específico si estamos en él
         elif self.current_chat in peers:
             self.chat_display.configure(state="normal")
             self.chat_display.insert(tk.END, f"{broadcast_msg}\n")
@@ -483,7 +457,6 @@ class LCPChat(tk.Tk):
         current_chat = self.current_chat
         filename = os.path.basename(filepath)
 
-        # Verificar que el usuario destinatario es válido
         peers = self.peer.get_peers()
         if current_chat not in peers:
             self.append_to_chat(
@@ -501,14 +474,12 @@ class LCPChat(tk.Tk):
         try:
             filename = os.path.basename(filepath)
 
-            # Mensaje en el historial del sistema
             self.update_queue.put(
                 lambda: self.append_to_chat(
                     "Sistema", f"Iniciando envío de archivo: {filename} a {user_to}"
                 )
             )
 
-            # Mensaje en el historial del destinatario para mantener consistencia
             file_msg = f"Enviando archivo: {filename}"
             self.update_queue.put(lambda: self.append_to_chat("Tú", file_msg, user_to))
 
@@ -538,18 +509,13 @@ class LCPChat(tk.Tk):
     def on_message(self, user_from, message):
         """Callback para mensajes recibidos"""
         logger.info(f"MENSAJE RECIBIDO de {user_from}: {message[:50]}...")
-
-        # Notificar con efecto visual además de agregar al chat
         try:
             self.status_var.set(f"✉️ Nuevo mensaje de {user_from}")
-            # Usar el queue para actualizar la UI desde el hilo principal
             self.update_queue.put(
                 lambda u=user_from, m=message: self.append_to_chat(u, m)
             )
 
-            # Si es un mensaje para el chat actual, reproducir un sonido o parpadear (si estuviera implementado)
             if user_from == self.current_chat:
-                # Aquí se podría implementar un indicador visual más notorio
                 pass
 
             logger.info(f"Mensaje de {user_from} procesado correctamente")
@@ -562,38 +528,28 @@ class LCPChat(tk.Tk):
         """Callback para archivos recibidos"""
         try:
             filename = os.path.basename(file_path)
-
-            # Notificar en el sistema
             self.append_to_chat(
                 "Sistema", f"Archivo recibido de {user_from}: {filename}"
             )
             self.append_to_chat("Sistema", f"Guardado como: {file_path}")
-
-            # Agregar al historial del remitente para verlo en la conversación
             file_msg = f"Archivo recibido: {filename}"
             self.append_to_chat(user_from, file_msg)
 
-            # Actualizar el estado
             self.status_var.set(f"✉️ Archivo recibido de {user_from}: {filename}")
         except Exception as e:
             logger.error(f"Error procesando archivo recibido: {e}", exc_info=True)
 
     def on_peer_change(self, user_id, added):
         """Callback para cambios en la lista de peers"""
-        # Normalizar el ID de usuario y asegurarse de que no esté vacío
         if user_id:
             clean_user_id = user_id.strip()
             if clean_user_id == "":
-                # Si el ID está vacío, no actualizar la UI ni mostrar mensaje
                 return
         else:
-            # Si no hay ID de usuario, no actualizar la UI ni mostrar mensaje
             return
 
         action = "conectado" if added else "desconectado"
         self.append_to_chat("Sistema", f"Usuario '{clean_user_id}' se ha {action}")
-
-        # Usar la cola de actualizaciones para evitar bloqueos
         self.update_queue.put(self.refresh_users)
 
     def on_file_progress(self, user_id, file_path, progress, status):
@@ -602,30 +558,24 @@ class LCPChat(tk.Tk):
             filename = os.path.basename(file_path)
 
             if status == "iniciando":
-                # Notificación al sistema
                 self.append_to_chat(
                     "Sistema", f"Iniciando envío de '{filename}' a {user_id}"
                 )
             elif status == "progreso":
                 if progress % 20 == 0:
-                    # Actualizar barra de estado para progreso
                     self.status_var.set(
                         f"Enviando '{filename}' a {user_id}: {progress}% completado"
                     )
-
-                    # Actualizar solo cuando hay cambios significativos
                     if progress in [20, 40, 60, 80, 100]:
                         progress_msg = f"Progreso de envío: {progress}%"
                         self.update_queue.put(
                             lambda: self.append_to_chat("Tú", progress_msg, user_id)
                         )
             elif status == "completado":
-                # Notificación al sistema
                 self.append_to_chat(
                     "Sistema", f"Archivo '{filename}' enviado correctamente a {user_id}"
                 )
 
-                # Notificación en el chat del destinatario
                 complete_msg = f"Archivo '{filename}' enviado correctamente"
                 self.update_queue.put(
                     lambda: self.append_to_chat("Tú", complete_msg, user_id)
@@ -658,7 +608,6 @@ class LCPChat(tk.Tk):
             except Exception as e:
                 logger.error(f"Error inesperado en cola de UI: {e}", exc_info=True)
 
-        # Ajustar la frecuencia según la carga
         pending = self.update_queue.qsize()
         next_interval = 50 if pending > 10 else (100 if pending > 0 else 500)
         self.after(next_interval, self.process_ui_updates)

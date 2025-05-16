@@ -19,7 +19,7 @@ logging.basicConfig(
 logger = logging.getLogger("LCP")
 
 
-class LCPPeer:
+class Peer:
     def __init__(self, user_id):
 
         self.user_id_str, self.user_id = self._ensure_20_bytes_id(user_id)
@@ -69,7 +69,6 @@ class LCPPeer:
         self._udp_socket_lock = threading.Lock()
         self._tcp_socket_lock = threading.Lock()
         self._callback_lock = threading.Lock()
-
         self._conversation_locks = {}
         self._conversation_locks_lock = threading.Lock()
 
@@ -181,7 +180,7 @@ class LCPPeer:
         }
 
     def _send_response(self, addr, status, reason=None):
-        """Envía una respuesta según el protocolo LCP (25 bytes)
+        """Envía una respuesta
 
         Args:
             addr: Tuple (IP, puerto) del destinatario
@@ -215,7 +214,7 @@ class LCPPeer:
             logger.error(f"Error enviando respuesta a {addr[0]}:{addr[1]}: {e}")
 
     def _build_response(self, status, reason=None):
-        """Construye respuesta de 25 bytes con código de estado
+        """Construye respuesta
 
         Args:
             status: Código de estado (0=OK, 1=Bad Request, 2=Internal Error)
@@ -301,12 +300,7 @@ class LCPPeer:
                         callback(user_id, False)
 
     def send_echo(self):
-        """Operación 0: Echo-Reply para descubrimiento de pares
-
-        Args:
-            wait_responses: Si es True, espera respuestas durante un breve tiempo
-                           y procesa los peers que responden
-        """
+        """Operación 0: Echo-Reply para descubrimiento de pares"""
         header = self._build_header(None, 0)
 
         logger.debug(
@@ -469,7 +463,6 @@ class LCPPeer:
                         f"Recibida respuesta de protocolo de 25 bytes desde {addr[0]}:{addr[1]} data: {data}"
                     )
                 else:
-                    print(data)
                     logger.warning(
                         f"Recibido mensaje UDP malformado desde {addr[0]}:{addr[1]} (tamaño: {len(data)} bytes)"
                     )
@@ -1719,7 +1712,7 @@ if __name__ == "__main__":
         print("Uso: python3 main.py <nombre_usuario>")
         sys.exit(1)
 
-    peer = LCPPeer(sys.argv[1])
+    peer = Peer(sys.argv[1])
 
     def on_message(user_from, message):
         print(f"\n[MSG de {user_from}]: {message}")
