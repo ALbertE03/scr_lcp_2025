@@ -2,7 +2,7 @@ import logging
 import platform
 import multiprocessing
 import subprocess
-import os
+
 
 logger = logging.getLogger("LCP")
 
@@ -29,15 +29,13 @@ def get_available_resources():
         logger.warning(
             f"No se pudo detectar el número de CPUs, usando valor por defecto: 4. Error: {e}"
         )
-
-    # Detección específica para cada sistema operativo
-    if resources["platform"] == "Darwin":  # macOS
+    if resources["platform"] == "Darwin":
         try:
             output = subprocess.check_output(["sysctl", "-n", "hw.memsize"]).strip()
             total_memory_bytes = int(output)
             resources["memory_gb"] = round(total_memory_bytes / (1024**3), 2)
 
-            # Obtener información de memoria disponible en macOS
+            # Obtener información de memoria disponible
             vm_stat = subprocess.check_output(["vm_stat"]).decode("utf-8").strip()
             lines = vm_stat.split("\n")
             memory_data = {}
@@ -66,68 +64,6 @@ def get_available_resources():
 
         except Exception as e:
             logger.warning(f"Error obteniendo recursos en macOS: {e}")
-
-    elif resources["platform"] == "Linux":
-        try:
-            with open("/proc/meminfo", "r") as f:
-                mem_info = {}
-                for line in f:
-                    if ":" in line:
-                        key, value = line.split(":", 1)
-                        value = value.strip()
-                        if "kB" in value:
-                            value = float(value.replace("kB", "").strip()) / (
-                                1024 * 1024
-                            )
-                        mem_info[key.strip()] = value
-
-            resources["memory_gb"] = float(mem_info.get("MemTotal", 0))
-            resources["memory_available_gb"] = float(mem_info.get("MemAvailable", 0))
-
-            with open("/proc/loadavg", "r") as f:
-                load = float(f.read().split()[0])
-            resources["system_load"] = load
-
-            logger.info(f"Memoria total: {resources['memory_gb']} GB")
-            logger.info(f"Memoria disponible: {resources['memory_available_gb']} GB")
-            logger.info(f"Carga del sistema: {resources['system_load']}")
-
-        except Exception as e:
-            logger.warning(f"Error obteniendo recursos en Linux: {e}")
-
-    elif resources["platform"] == "Windows":
-        try:
-            import ctypes
-
-            class MEMORYSTATUSEX(ctypes.Structure):
-                _fields_ = [
-                    ("dwLength", ctypes.c_ulong),
-                    ("dwMemoryLoad", ctypes.c_ulong),
-                    ("ullTotalPhys", ctypes.c_ulonglong),
-                    ("ullAvailPhys", ctypes.c_ulonglong),
-                    ("ullTotalPageFile", ctypes.c_ulonglong),
-                    ("ullAvailPageFile", ctypes.c_ulonglong),
-                    ("ullTotalVirtual", ctypes.c_ulonglong),
-                    ("ullAvailVirtual", ctypes.c_ulonglong),
-                    ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
-                ]
-
-            memory_status = MEMORYSTATUSEX()
-            memory_status.dwLength = ctypes.sizeof(MEMORYSTATUSEX)
-            ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(memory_status))
-
-            resources["memory_gb"] = round(memory_status.ullTotalPhys / (1024**3), 2)
-            resources["memory_available_gb"] = round(
-                memory_status.ullAvailPhys / (1024**3), 2
-            )
-            resources["system_load"] = memory_status.dwMemoryLoad / 100.0
-
-            logger.info(f"Memoria total: {resources['memory_gb']} GB")
-            logger.info(f"Memoria disponible: {resources['memory_available_gb']} GB")
-            logger.info(f"Carga del sistema: {resources['system_load']}")
-
-        except Exception as e:
-            logger.warning(f"Error obteniendo recursos en Windows: {e}")
 
     return resources
 

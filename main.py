@@ -7,9 +7,7 @@ import queue
 import random
 import logging
 import os
-import sys
-from utils.network_utils import *
-from utils.system_info import *
+from utils import get_optimal_thread_count, get_network_info
 
 logging.basicConfig(
     level=logging.INFO,
@@ -21,6 +19,9 @@ logger = logging.getLogger("LCP")
 
 class Peer:
     def __init__(self, user_id):
+
+        self._expected_message_bodies = {}
+        self._expected_bodies_lock = threading.Lock()
 
         self.user_id_str, self.user_id = self._ensure_20_bytes_id(user_id)
 
@@ -79,7 +80,7 @@ class Peer:
 
         self.tcp_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.tcp_socket.bind(("0.0.0.0", TCP_PORT))
-        self.tcp_socket.listen(5)
+        self.tcp_socket.listen(self.max_concurrent_transfers)
         logger.info(f"Socket TCP inicializado en 0.0.0.0:{TCP_PORT}")
 
         udp_thread = threading.Thread(
@@ -145,8 +146,8 @@ class Peer:
         return header
 
     def _parse_header(self, data):
-        """Parsea un header LCP de 100 bytes"""
-        if len(data) < 100:
+        """Parsea un header"""
+        if len(data) < 100 or len(data) > 100:
             return None
 
         user_to_bytes = data[20:40]
@@ -158,18 +159,14 @@ class Peer:
             try:
                 user_to = user_to_bytes.decode("utf-8").rstrip("\x00")
             except UnicodeDecodeError:
-                logger.warning(
-                    f"Error decodificando campo user_to, usando representación hexadecimal"
-                )
-                user_to = "0x" + user_to_bytes.hex()
+                logger.warning(f"Error decodificando campo user_to")
+                user_to = user_to_bytes.decode("utf-8", errors="replace")
 
         try:
             user_from = data[0:20].decode("utf-8").rstrip("\x00")
         except UnicodeDecodeError:
-            logger.warning(
-                f"Error decodificando campo user_from, usando representación hexadecimal"
-            )
-            user_from = "0x" + data[0:20].hex()
+            logger.warning(f"Error decodificando campo user_from")
+            user_from = data[0:20].decode("utf-8", errors="replace")
 
         return {
             "user_from": user_from,
@@ -300,7 +297,7 @@ class Peer:
                         callback(user_id, False)
 
     def send_echo(self):
-        """Operación 0: Echo-Reply para descubrimiento de pares"""
+        """Operación 0: Echo-Reply para descubrimiento"""
         header = self._build_header(None, 0)
 
         logger.debug(
@@ -327,7 +324,6 @@ class Peer:
                 while time.time() - start_time < 5:
                     try:
                         resp_data, resp_addr = echo_socket.recvfrom(25)
-
                         if len(resp_data) == 25:
                             raw_status = resp_data[0]
                             user_id_bytes = resp_data[0:20]
@@ -456,17 +452,37 @@ class Peer:
     def _handle_udp_message(self, data, addr):
         """Maneja un mensaje UDP en un hilo separado"""
         try:
+            # Primero verificar si este paquete es un cuerpo de mensaje que estamos esperando
+            # Para eso el tamaño debe ser mayor a 8 (tamaño del body_id)
+            if len(data) > 8:
+                try:
+                    body_id = int.from_bytes(data[:8], "big")
+
+                    with self._expected_bodies_lock:
+                        key = f"{addr[0]}:{body_id}"
+                        if key in self._expected_message_bodies:
+                            self._expected_message_bodies[key]["data"] = data
+                            self._expected_message_bodies[key]["received"] = True
+                            self._expected_message_bodies[key]["event"].set()
+
+                            thread_name = threading.current_thread().name
+                            logger.debug(
+                                f"{thread_name} recibió cuerpo de mensaje con ID {body_id} de {addr[0]}, notificando al hilo de procesamiento"
+                            )
+                            return
+
+                except Exception as e:
+                    logger.debug(f"Error verificando si es un cuerpo de mensaje: {e}")
+
+            if len(data) > 100:
+                return self._send_response(addr, RESPONSE_BAD_REQUEST)
+            elif len(data) < 100:
+                logger.warning(
+                    f"Recibido mensaje UDP con formato desconocido desde {addr[0]}:{addr[1]} (tamaño: {len(data)} bytes)"
+                )
+                return self._send_response(addr, RESPONSE_BAD_REQUEST)
+
             header = self._parse_header(data)
-            if not header:
-                if len(data) == 25:
-                    logger.debug(
-                        f"Recibida respuesta de protocolo de 25 bytes desde {addr[0]}:{addr[1]} data: {data}"
-                    )
-                else:
-                    logger.warning(
-                        f"Recibido mensaje UDP malformado desde {addr[0]}:{addr[1]} (tamaño: {len(data)} bytes)"
-                    )
-                return
 
             sender_id = self._normalize_user_id(header["user_from"])
             my_id = self._normalize_user_id(self.user_id_str)
@@ -499,7 +515,7 @@ class Peer:
                             except UnicodeDecodeError:
                                 sender_bytes = sender_bytes[:-1]
                                 if len(sender_bytes) == 0:
-                                    normalized_id = f"Unknown-{addr[0]}"
+                                    normalized_id = f"Unknown-{addr[0]}".ljust(20)[:20]
                                     break
                     else:
                         normalized_id = header["user_from"].ljust(20)[:20]
@@ -664,18 +680,56 @@ class Peer:
                 self._send_response(addr, RESPONSE_OK)
                 logger.info(f"{worker_name} confirmó recepción de header a {user_from}")
 
-            # Fase 2: Recibir cuerpo del mensaje usando el socket principal
             try:
+                # Fase 2: Recibir cuerpo del mensaje
                 timeout_secs = 5
-                logger.info(
-                    f"{worker_name} esperando cuerpo del mensaje de {user_from} (timeout: {timeout_secs}s)"
-                )
+                expected_body_id = header["body_id"]
+                expected_length = header["body_length"]
 
-                with self._udp_socket_lock:
-                    self.udp_socket.settimeout(timeout_secs)
-                    buffer_size = header["body_length"] + 8 + 256
-                    body_data, msg_addr = self.udp_socket.recvfrom(buffer_size)
-                    self.udp_socket.settimeout(None)
+                message_wait_event = threading.Event()
+                key = f"{addr[0]}:{expected_body_id}"
+
+                with self._expected_bodies_lock:
+                    self._expected_message_bodies[key] = {
+                        "data": None,
+                        "received": False,
+                        "event": message_wait_event,
+                        "timestamp": time.time(),
+                    }
+                    logger.debug(
+                        f"{worker_name} registrando espera de cuerpo de mensaje con ID {expected_body_id} de {addr[0]}"
+                    )
+
+                # Fase 2: Esperamos por el evento de recepción del cuerpo
+                received = message_wait_event.wait(timeout_secs)
+
+                if not received:
+                    logger.error(
+                        f"{worker_name} timeout esperando cuerpo con ID {expected_body_id} de {addr[0]}"
+                    )
+                    with self._expected_bodies_lock:
+                        if key in self._expected_message_bodies:
+                            del self._expected_message_bodies[key]
+                    raise socket.timeout("Timeout esperando cuerpo del mensaje")
+
+                # Obtenemos los datos del cuerpo
+                with self._expected_bodies_lock:
+                    if key not in self._expected_message_bodies:
+                        raise Exception(
+                            f"Mensaje con ID {expected_body_id} no encontrado en el registro"
+                        )
+
+                    message_data = self._expected_message_bodies[key]
+                    body_data = message_data["data"]
+                    del self._expected_message_bodies[key]
+
+                logger.info(
+                    f"{worker_name} recibido cuerpo de mensaje: {len(body_data)} bytes"
+                )
+                msg_addr = (
+                    addr[0],
+                    addr[1],
+                )
 
                 logger.info(
                     f"{worker_name} recibió {len(body_data)} bytes de datos desde {msg_addr[0]}:{msg_addr[1]}"
@@ -696,14 +750,12 @@ class Peer:
                 received_body_id = (
                     int.from_bytes(body_data[:8], "big") if len(body_data) >= 8 else -1
                 )
-                expected_body_id = header["body_id"]
 
-                if received_body_id == expected_body_id:
+                if received_body_id == expected_body_id.to_bytes(8, "big"):
                     logger.debug(
                         f"{worker_name} verificó BodyId correcto: {received_body_id}"
                     )
 
-                    expected_length = header["body_length"]
                     actual_length = len(body_data) - 8
 
                     if actual_length != expected_length:
@@ -742,6 +794,7 @@ class Peer:
                             with self._udp_socket_lock:
                                 self._send_response(addr, RESPONSE_OK)
                             return
+
                         callbacks_count = len(self.message_callbacks)
                         if callbacks_count == 0:
                             logger.debug(
@@ -801,7 +854,6 @@ class Peer:
                     f"{worker_name} timeout esperando datos de mensaje de {user_from}"
                 )
                 with self._udp_socket_lock:
-                    self.udp_socket.settimeout(None)
                     self._send_response(
                         addr,
                         RESPONSE_INTERNAL_ERROR,
@@ -813,17 +865,13 @@ class Peer:
                     exc_info=True,
                 )
                 with self._udp_socket_lock:
-                    self.udp_socket.settimeout(None)
                     self._send_response(
                         addr, RESPONSE_INTERNAL_ERROR, f"Error interno: {str(e)}"
                     )
             finally:
-                with self._udp_socket_lock:
-                    self.udp_socket.settimeout(None)
-
                 if random.random() < 0.1:
                     logger.debug(
-                        f"{worker_name} iniciando limpieza de locks de conversación antiguos"
+                        f"{worker_name} iniciando limpieza de locks de conversación antiguas"
                     )
                     self._cleanup_conversation_locks()
 
@@ -1679,27 +1727,6 @@ class Peer:
             result_bytes = id_bytes
 
         return result_str, result_bytes
-
-    def _check_operation_timeout(self, operation_type, start_time, file_transfer=False):
-        """Verifica si una operación ha superado el tiempo máximo según el protocolo.
-
-        Args:
-            operation_type: Tipo de operación (ECHO, MESSAGE, FILE)
-            start_time: Tiempo de inicio de la operación
-            file_transfer: Si es una transferencia de archivo (tiene reglas especiales)
-
-        Returns:
-            bool: True si la operación ha excedido el tiempo máximo, False en caso contrario
-        """
-        elapsed = time.time() - start_time
-
-        if not file_transfer and elapsed > 5:
-            logger.warning(
-                f"Operación {operation_type} excedió el límite de 5 segundos: {elapsed:.2f}s"
-            )
-            return True
-
-        return False
 
     def close(self):
         """Cierra las conexiones"""

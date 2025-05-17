@@ -2,12 +2,11 @@ import tkinter as tk
 from tkinter import ttk, scrolledtext, filedialog, simpledialog
 import time
 import os
-from protocol import *
-from main import Peer
 import logging
 import concurrent.futures
 import queue
-from utils.system_info import get_optimal_thread_count
+from utils import get_optimal_thread_count
+from main import Peer
 
 logging.basicConfig(
     level=logging.WARNING,

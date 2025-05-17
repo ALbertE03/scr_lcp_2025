@@ -1,13 +1,13 @@
-import logging
+import socket
 import platform
 import subprocess
-import re
+import logging
 
 logger = logging.getLogger("LCP")
 
 
 def get_network_info():
-    """Obtiene información de red sin dependencias externas"""
+    """Obtiene información de red"""
     system = platform.system()
     broadcast_addresses = []
 
@@ -19,9 +19,6 @@ def get_network_info():
                 shell=True,
             )
             broadcast_addresses = output.splitlines()
-        if not broadcast_addresses:
-            logger.info("Usando dirección de broadcast por defecto (255.255.255.255)")
-            broadcast_addresses.append("255.255.255.255")
 
     except Exception as e:
         logger.error(f"Error obteniendo información de red: {e}")
