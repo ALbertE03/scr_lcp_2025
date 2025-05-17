@@ -1,7 +1,3 @@
-"""
-Utilidades para la aplicación LCP
-"""
-
 from .network import get_network_info
 from .system_info import get_available_resources, get_optimal_thread_count
 

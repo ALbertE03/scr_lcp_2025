@@ -47,6 +47,8 @@ class LCPChat(tk.Tk):
         self.chat_history = {}
         self.selected_user = tk.StringVar()
 
+        self.file_progress_bars = {}
+
         self.create_widgets()
 
         self.after(1000, self.update_ui)
@@ -74,6 +76,136 @@ class LCPChat(tk.Tk):
             username = f"User{int(time.time())%1000}"
         return username
 
+    def create_progress_bar(self, user_id, filename):
+        """Crea una barra de progreso visual para un archivo en transferencia"""
+        file_key = f"{user_id}_{filename}"
+
+        if file_key in self.file_progress_bars:
+            self.remove_progress_bar(user_id, filename)
+
+        progress_frame = tk.Frame(self, bg="#f0f0f0", relief=tk.RIDGE, borderwidth=2)
+        progress_frame.pack(side=tk.BOTTOM, fill=tk.X, padx=10, pady=5)
+
+        icon_label = tk.Label(
+            progress_frame, text="📄", font=("Arial", 16), bg="#f0f0f0"
+        )
+        icon_label.pack(side=tk.LEFT, padx=(5, 0))
+
+        file_label = tk.Label(
+            progress_frame,
+            text=f"Enviando: {filename} a {user_id}",
+            font=("Arial", 10, "bold"),
+            bg="#f0f0f0",
+        )
+        file_label.pack(side=tk.LEFT, padx=(5, 10))
+
+        self.style.configure(
+            f"FileTransfer.Horizontal.TProgressbar",
+            background="#4CAF50",
+            troughcolor="#e1e1e1",
+            bordercolor="#ddd",
+            lightcolor="#4CAF50",
+            darkcolor="#4CAF50",
+        )
+
+        progress_bar = ttk.Progressbar(
+            progress_frame,
+            orient=tk.HORIZONTAL,
+            length=300,
+            mode="determinate",
+            style="FileTransfer.Horizontal.TProgressbar",
+        )
+        progress_bar.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 5))
+
+        percent_label = tk.Label(
+            progress_frame,
+            text="0%",
+            width=5,
+            font=("Arial", 10, "bold"),
+            fg="#333333",
+            bg="#f0f0f0",
+        )
+        percent_label.pack(side=tk.LEFT, padx=(0, 10))
+
+        self.file_progress_bars[file_key] = {
+            "frame": progress_frame,
+            "bar": progress_bar,
+            "label": percent_label,
+            "file_label": file_label,
+            "icon": icon_label,
+        }
+
+        progress_frame.update()
+        progress_frame._alpha = 0.0
+
+        def fade_in():
+            progress_frame._alpha += 0.1
+            if progress_frame._alpha < 1.0:
+                self.after(50, fade_in)
+
+        fade_in()
+
+    def update_progress_bar(self, user_id, filename, progress):
+        """Actualiza el valor de una barra de progreso existente"""
+        file_key = f"{user_id}_{filename}"
+
+        if file_key in self.file_progress_bars:
+            progress_data = self.file_progress_bars[file_key]
+
+            progress_data["bar"]["value"] = progress
+            progress_data["label"].config(text=f"{progress}%")
+
+            if progress < 100:
+                progress_data["file_label"].config(
+                    text=f"Enviando: {filename} a {user_id}"
+                )
+                progress_data["icon"].config(text="🔄")
+            else:
+                progress_data["file_label"].config(
+                    text=f"Completado: {filename} a {user_id}"
+                )
+
+                progress_data["icon"].config(text="✅")
+
+            if progress >= 100:
+                progress_data["file_label"].config(fg="green")
+                progress_data["label"].config(fg="green")
+                self.style.configure(
+                    f"FileTransfer.Horizontal.TProgressbar",
+                    background="#4CAF50",
+                    troughcolor="#e1e1e1",
+                )
+            elif progress > 50:
+                self.style.configure(
+                    f"FileTransfer.Horizontal.TProgressbar",
+                    background="#2196F3",
+                    troughcolor="#e1e1e1",
+                )
+
+            progress_data["frame"].update()
+
+    def remove_progress_bar(self, user_id, filename):
+        """Elimina una barra de progreso de la interfaz con efecto de desvanecer"""
+        file_key = f"{user_id}_{filename}"
+
+        if file_key in self.file_progress_bars:
+            progress_data = self.file_progress_bars[file_key]
+            frame = progress_data["frame"]
+
+            frame._alpha = 1.0
+
+            def fade_out():
+                frame._alpha -= 0.1
+                if frame._alpha <= 0:
+                    frame.destroy()
+                    if file_key in self.file_progress_bars:
+                        del self.file_progress_bars[file_key]
+                else:
+
+                    self.after(50, fade_out)
+
+            self.after(500, fade_out)
+
     def create_widgets(self):
         """Crea los widgets de la interfaz"""
         main_paned = ttk.PanedWindow(self, orient=tk.HORIZONTAL)
@@ -95,7 +227,7 @@ class LCPChat(tk.Tk):
             listvariable=self.selected_user,
             selectmode=tk.SINGLE,
             height=20,
-            font=("Arial", 11),
+            font=("Arial", 15),
         )
         self.users_list.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
         self.users_list.bind("<<ListboxSelect>>", self.on_user_select)
@@ -104,7 +236,7 @@ class LCPChat(tk.Tk):
             users_frame,
             text="Actualizar",
             command=self.refresh_users,
-            font=("Arial", 11),
+            font=("Arial", 15, "bold"),
             bg="#e1e1e1",
             fg="black",
             padx=10,
@@ -120,14 +252,14 @@ class LCPChat(tk.Tk):
             wrap=tk.WORD,
             state="disabled",
             height=20,
-            font=("Arial", 11),
+            font=("Arial", 15),
         )
         self.chat_display.pack(fill=tk.BOTH, expand=True)
 
         input_frame = ttk.Frame(chat_frame)
         input_frame.pack(fill=tk.X, padx=5, pady=5)
 
-        self.message_input = ttk.Entry(input_frame, font=("Arial", 11))
+        self.message_input = ttk.Entry(input_frame, font=("Arial", 20))
         self.message_input.pack(fill=tk.X, side=tk.LEFT, expand=True, padx=(0, 5))
         self.message_input.bind("<Return>", self.send_message)
 
@@ -140,7 +272,7 @@ class LCPChat(tk.Tk):
             command=self.send_message,
             bg="#4CAF50",
             fg="black",
-            font=("Arial", 11, "bold"),
+            font=("Arial", 15, "bold"),
             padx=15,
             pady=5,
         )
@@ -152,7 +284,7 @@ class LCPChat(tk.Tk):
             command=self.send_broadcast,
             bg="#FF9800",
             fg="black",
-            font=("Arial", 11),
+            font=("Arial", 15, "bold"),
             padx=15,
             pady=5,
         )
@@ -164,7 +296,7 @@ class LCPChat(tk.Tk):
             command=self.send_file,
             bg="#2196F3",
             fg="black",
-            font=("Arial", 11),
+            font=("Arial", 15, "bold"),
             padx=15,
             pady=5,
         )
@@ -473,6 +605,8 @@ class LCPChat(tk.Tk):
         try:
             filename = os.path.basename(filepath)
 
+            self.update_queue.put(lambda: self.create_progress_bar(user_to, filename))
+
             self.update_queue.put(
                 lambda: self.append_to_chat(
                     "Sistema", f"Iniciando envío de archivo: {filename} a {user_to}"
@@ -481,6 +615,10 @@ class LCPChat(tk.Tk):
 
             file_msg = f"Enviando archivo: {filename}"
             self.update_queue.put(lambda: self.append_to_chat("Tú", file_msg, user_to))
+
+            self.update_queue.put(
+                lambda: self.update_progress_bar(user_to, filename, 0)
+            )
 
             success = self.peer.send_file(user_to, filepath)
 
@@ -494,6 +632,10 @@ class LCPChat(tk.Tk):
                     lambda: self.status_var.set("Error al enviar archivo")
                 )
 
+                self.update_queue.put(
+                    lambda: self.remove_progress_bar(user_to, filename)
+                )
+
         except Exception as e:
             logger.error(f"Error enviando archivo: {e}")
             self.update_queue.put(
@@ -504,6 +646,7 @@ class LCPChat(tk.Tk):
             self.update_queue.put(
                 lambda: self.status_var.set("Error al enviar archivo")
             )
+            self.update_queue.put(lambda: self.remove_progress_bar(user_to, filename))
 
     def on_message(self, user_from, message):
         """Callback para mensajes recibidos"""
@@ -527,6 +670,15 @@ class LCPChat(tk.Tk):
         """Callback para archivos recibidos"""
         try:
             filename = os.path.basename(file_path)
+
+            self.status_var.set(f"✉️ Archivo recibido de {user_from}: {filename}")
+
+            self.update_queue.put(lambda: self.create_progress_bar(user_from, filename))
+
+            self.update_queue.put(
+                lambda: self.update_progress_bar(user_from, filename, 100)
+            )
+
             self.append_to_chat(
                 "Sistema", f"Archivo recibido de {user_from}: {filename}"
             )
@@ -534,7 +686,8 @@ class LCPChat(tk.Tk):
             file_msg = f"Archivo recibido: {filename}"
             self.append_to_chat(user_from, file_msg)
 
-            self.status_var.set(f"✉️ Archivo recibido de {user_from}: {filename}")
+            self.after(3000, lambda: self.remove_progress_bar(user_from, filename))
+
         except Exception as e:
             logger.error(f"Error procesando archivo recibido: {e}", exc_info=True)
 
@@ -555,22 +708,34 @@ class LCPChat(tk.Tk):
         """Callback para actualizaciones de progreso de transferencias"""
         try:
             filename = os.path.basename(file_path)
+            file_key = f"{user_id}_{filename}"
 
             if status == "iniciando":
                 self.append_to_chat(
                     "Sistema", f"Iniciando envío de '{filename}' a {user_id}"
                 )
+                self.update_queue.put(
+                    lambda: self.create_progress_bar(user_id, filename)
+                )
             elif status == "progreso":
-                if progress % 20 == 0:
-                    self.status_var.set(
-                        f"Enviando '{filename}' a {user_id}: {progress}% completado"
+                self.update_queue.put(
+                    lambda p=progress: self.update_progress_bar(user_id, filename, p)
+                )
+
+                self.status_var.set(
+                    f"Enviando '{filename}' a {user_id}: {progress}% completado"
+                )
+
+                if progress in [25, 50, 75, 100]:
+                    progress_msg = f"Progreso de envío: {progress}%"
+                    self.update_queue.put(
+                        lambda: self.append_to_chat("Tú", progress_msg, user_id)
                     )
-                    if progress in [20, 40, 60, 80, 100]:
-                        progress_msg = f"Progreso de envío: {progress}%"
-                        self.update_queue.put(
-                            lambda: self.append_to_chat("Tú", progress_msg, user_id)
-                        )
             elif status == "completado":
+                self.update_queue.put(
+                    lambda: self.update_progress_bar(user_id, filename, 100)
+                )
+
                 self.append_to_chat(
                     "Sistema", f"Archivo '{filename}' enviado correctamente a {user_id}"
                 )
@@ -579,6 +744,7 @@ class LCPChat(tk.Tk):
                 self.update_queue.put(
                     lambda: self.append_to_chat("Tú", complete_msg, user_id)
                 )
+                self.after(3000, lambda: self.remove_progress_bar(user_id, filename))
 
                 self.status_var.set("Listo")
             elif status == "error":
@@ -586,6 +752,10 @@ class LCPChat(tk.Tk):
                     "Sistema", f"Error enviando archivo '{filename}' a {user_id}"
                 )
                 self.status_var.set("Error en la transferencia")
+
+                self.update_queue.put(
+                    lambda: self.remove_progress_bar(user_id, filename)
+                )
         except Exception as e:
             logger.error(f"Error en callback de progreso: {e}", exc_info=True)
 

@@ -452,8 +452,6 @@ class Peer:
     def _handle_udp_message(self, data, addr):
         """Maneja un mensaje UDP en un hilo separado"""
         try:
-            # Primero verificar si este paquete es un cuerpo de mensaje que estamos esperando
-            # Para eso el tamaño debe ser mayor a 8 (tamaño del body_id)
             if len(data) > 8:
                 try:
                     body_id = int.from_bytes(data[:8], "big")
@@ -751,7 +749,7 @@ class Peer:
                     int.from_bytes(body_data[:8], "big") if len(body_data) >= 8 else -1
                 )
 
-                if received_body_id == expected_body_id.to_bytes(8, "big"):
+                if received_body_id == expected_body_id:
                     logger.debug(
                         f"{worker_name} verificó BodyId correcto: {received_body_id}"
                     )
