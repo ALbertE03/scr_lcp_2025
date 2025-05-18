@@ -7,6 +7,7 @@ import queue
 import random
 import logging
 import os
+import json
 from utils import get_optimal_thread_count, get_network_info
 
 logging.basicConfig(
@@ -22,6 +23,10 @@ class Peer:
 
         self._expected_message_bodies = {}
         self._expected_bodies_lock = threading.Lock()
+
+        self._message_history = {}
+        self._message_history_lock = threading.Lock()
+        self._MAX_MESSAGE_HISTORY = 10
 
         self.user_id_str, self.user_id = self._ensure_20_bytes_id(user_id)
 
@@ -807,6 +812,11 @@ class Peer:
                                 )
                                 for i, callback in enumerate(self.message_callbacks):
                                     try:
+                                        # Almacenar el mensaje en el historial antes de enviarlo a los callbacks
+                                        self._store_message_in_history(
+                                            safe_user_from, message, is_outgoing=False
+                                        )
+
                                         callback(safe_user_from, message)
                                         if i == 0 or i == callbacks_count - 1:
                                             logger.debug(
@@ -1360,6 +1370,10 @@ class Peer:
                         logger.info(
                             f"FASE 2 completada: mensaje entregado exitosamente a {found_peer}"
                         )
+                        # Almacenar el mensaje enviado en el historial
+                        self._store_message_in_history(
+                            found_peer, message, is_outgoing=True
+                        )
                     else:
                         logger.error(
                             f"Error en confirmación final: status={resp_data[0]}"
@@ -1656,6 +1670,12 @@ class Peer:
             logger.info(
                 f"Mensaje broadcast enviado correctamente después de {retry_count} reintentos"
             )
+
+            # Guardar el mensaje broadcast en el historial de cada peer conocido
+            with self._peers_lock:
+                for peer_id in self.peers.keys():
+                    self._store_message_in_history(peer_id, message, is_outgoing=True)
+
             return True
         else:
             logger.error(
@@ -1771,6 +1791,123 @@ class Peer:
             result_bytes = id_bytes
 
         return result_str, result_bytes
+
+    def get_message_history(self, user_id):
+        """Obtiene el historial de mensajes con un usuario específico
+
+        Args:
+            user_id: ID del usuario del que se quiere recuperar el historial
+
+        Returns:
+            list: Lista de diccionarios con los mensajes intercambiados. Cada mensaje tiene:
+                 - 'from': ID del remitente ('self' para mensajes propios)
+                 - 'text': Contenido del mensaje
+                 - 'timestamp': Marca de tiempo en formato datetime
+        """
+        normalized_id = self._normalize_user_id(user_id)
+        with self._message_history_lock:
+            return self._message_history.get(normalized_id, [])[:]
+
+    def _store_message_in_history(self, user_id, message, is_outgoing=False):
+        """Almacena un mensaje en el historial
+
+        Args:
+            user_id: ID del usuario con el que se intercambió el mensaje
+            message: Contenido del mensaje
+            is_outgoing: True si el mensaje fue enviado por este peer, False si fue recibido
+        """
+        normalized_id = self._normalize_user_id(user_id)
+        timestamp = datetime.now()
+
+        with self._message_history_lock:
+            if normalized_id not in self._message_history:
+                self._message_history[normalized_id] = []
+
+            self._message_history[normalized_id].append(
+                {
+                    "from": "self" if is_outgoing else normalized_id,
+                    "text": message,
+                    "timestamp": timestamp,
+                }
+            )
+
+            if len(self._message_history[normalized_id]) > self._MAX_MESSAGE_HISTORY:
+                self._message_history[normalized_id] = self._message_history[
+                    normalized_id
+                ][-self._MAX_MESSAGE_HISTORY :]
+
+        self.save_message_history()
+
+    def save_message_history(self):
+        """Guarda el historial de mensajes en un archivo para persistencia
+
+        Se guarda en un archivo JSON en el directorio actual con el nombre basado
+        en el ID del usuario.
+        """
+        try:
+            normalized_id = self._normalize_user_id(self.user_id_str)
+            history_file = f"lcp_history_{normalized_id.strip().replace(' ', '_')}.json"
+
+            serializable_history = {}
+            with self._message_history_lock:
+                for peer_id, messages in self._message_history.items():
+                    serializable_history[peer_id] = []
+                    for msg in messages:
+                        serializable_msg = msg.copy()
+                        serializable_msg["timestamp"] = serializable_msg[
+                            "timestamp"
+                        ].strftime("%Y-%m-%d %H:%M:%S")
+                        serializable_history[peer_id].append(serializable_msg)
+
+            with open(history_file, "w") as f:
+                json.dump(serializable_history, f)
+
+            logger.debug(f"Historial de mensajes guardado en {history_file}")
+            return True
+        except Exception as e:
+            logger.error(f"Error guardando historial de mensajes: {e}", exc_info=True)
+            return False
+
+    def load_message_history(self):
+        """Carga el historial de mensajes desde un archivo
+
+        Se carga desde un archivo JSON en el directorio actual con el nombre basado
+        en el ID del usuario.
+
+        Returns:
+            bool: True si se pudo cargar el historial, False en caso contrario
+        """
+        try:
+            normalized_id = self._normalize_user_id(self.user_id_str)
+            history_file = f"lcp_history_{normalized_id.strip().replace(' ', '_')}.json"
+
+            if not os.path.exists(history_file):
+                logger.info(
+                    f"No existe archivo de historial de mensajes: {history_file}"
+                )
+                return False
+
+            with open(history_file, "r") as f:
+                serialized_history = json.load(f)
+
+            # Convertimos las cadenas de timestamp a objetos datetime
+            with self._message_history_lock:
+                for peer_id, messages in serialized_history.items():
+                    if peer_id not in self._message_history:
+                        self._message_history[peer_id] = []
+
+                    for msg in messages:
+                        # Convertimos el timestamp de string a datetime
+                        msg["timestamp"] = datetime.strptime(
+                            msg["timestamp"], "%Y-%m-%d %H:%M:%S"
+                        )
+                        self._message_history[peer_id].append(msg)
+
+            logger.info(f"Historial de mensajes cargado desde {history_file}")
+            return True
+        except Exception as e:
+            logger.error(f"Error cargando historial de mensajes: {e}", exc_info=True)
+            return False
 
     def close(self):
         """Cierra las conexiones"""
