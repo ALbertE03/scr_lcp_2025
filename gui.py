@@ -81,7 +81,13 @@ class LCPChat(tk.Tk):
         file_key = f"{user_id}_{filename}"
 
         if file_key in self.file_progress_bars:
-            self.remove_progress_bar(user_id, filename)
+            logger.debug(
+                f"Eliminando barra de progreso existente para {file_key} antes de crear una nueva"
+            )
+            progress_data = self.file_progress_bars[file_key]
+            if "frame" in progress_data and progress_data["frame"] is not None:
+                progress_data["frame"].destroy()
+            del self.file_progress_bars[file_key]
 
         progress_frame = tk.Frame(self, bg="#f0f0f0", relief=tk.RIDGE, borderwidth=2)
         progress_frame.pack(side=tk.BOTTOM, fill=tk.X, padx=10, pady=5)
@@ -164,25 +170,15 @@ class LCPChat(tk.Tk):
                 progress_data["file_label"].config(
                     text=f"Completado: {filename} a {user_id}"
                 )
-
+                # Para transferencias completadas, usamos el ícono de completado
                 progress_data["icon"].config(text="✅")
 
-            if progress >= 100:
-                progress_data["file_label"].config(fg="green")
-                progress_data["label"].config(fg="green")
-                self.style.configure(
-                    f"FileTransfer.Horizontal.TProgressbar",
-                    background="#4CAF50",
-                    troughcolor="#e1e1e1",
-                )
-            elif progress > 50:
-                self.style.configure(
-                    f"FileTransfer.Horizontal.TProgressbar",
-                    background="#2196F3",
-                    troughcolor="#e1e1e1",
-                )
-
             progress_data["frame"].update()
+        else:
+            # Si la barra no existe, mejor no hacer nada para evitar problemas
+            logger.debug(
+                f"No existe una barra de progreso para {file_key}, no se puede actualizar"
+            )
 
     def remove_progress_bar(self, user_id, filename):
         """Elimina una barra de progreso de la interfaz con efecto de desvanecer"""
@@ -192,19 +188,35 @@ class LCPChat(tk.Tk):
             progress_data = self.file_progress_bars[file_key]
             frame = progress_data["frame"]
 
-            frame._alpha = 1.0
+            # Para evitar problemas si se llama remove_progress_bar múltiples veces
+            if not hasattr(frame, "_is_fading_out"):
+                frame._is_fading_out = True
+                frame._alpha = 1.0
 
-            def fade_out():
-                frame._alpha -= 0.1
-                if frame._alpha <= 0:
-                    frame.destroy()
-                    if file_key in self.file_progress_bars:
-                        del self.file_progress_bars[file_key]
-                else:
+                def fade_out():
+                    if not hasattr(frame, "_alpha"):
+                        # La ventana ya ha sido destruida
+                        if file_key in self.file_progress_bars:
+                            del self.file_progress_bars[file_key]
+                        return
 
-                    self.after(50, fade_out)
+                    frame._alpha -= 0.1
+                    if frame._alpha <= 0:
+                        frame.destroy()
+                        if file_key in self.file_progress_bars:
+                            del self.file_progress_bars[file_key]
+                    else:
+                        self.after(50, fade_out)
 
-            self.after(500, fade_out)
+                self.after(500, fade_out)
+            else:
+                logger.debug(
+                    f"La barra de progreso {file_key} ya está siendo eliminada"
+                )
+        else:
+            logger.debug(
+                f"Intento de eliminar barra de progreso inexistente: {file_key}"
+            )
 
     def create_widgets(self):
         """Crea los widgets de la interfaz"""
@@ -605,8 +617,6 @@ class LCPChat(tk.Tk):
         try:
             filename = os.path.basename(filepath)
 
-            self.update_queue.put(lambda: self.create_progress_bar(user_to, filename))
-
             self.update_queue.put(
                 lambda: self.append_to_chat(
                     "Sistema", f"Iniciando envío de archivo: {filename} a {user_to}"
@@ -615,10 +625,6 @@ class LCPChat(tk.Tk):
 
             file_msg = f"Enviando archivo: {filename}"
             self.update_queue.put(lambda: self.append_to_chat("Tú", file_msg, user_to))
-
-            self.update_queue.put(
-                lambda: self.update_progress_bar(user_to, filename, 0)
-            )
 
             success = self.peer.send_file(user_to, filepath)
 
@@ -673,11 +679,8 @@ class LCPChat(tk.Tk):
 
             self.status_var.set(f"✉️ Archivo recibido de {user_from}: {filename}")
 
-            self.update_queue.put(lambda: self.create_progress_bar(user_from, filename))
-
-            self.update_queue.put(
-                lambda: self.update_progress_bar(user_from, filename, 100)
-            )
+            # Solo mostrar el archivo recibido sin crear barra de progreso
+            # ya que el archivo ya se recibió completo
 
             self.append_to_chat(
                 "Sistema", f"Archivo recibido de {user_from}: {filename}"
@@ -710,17 +713,37 @@ class LCPChat(tk.Tk):
             filename = os.path.basename(file_path)
             file_key = f"{user_id}_{filename}"
 
+            # Gestión centralizada de barras de progreso
             if status == "iniciando":
                 self.append_to_chat(
                     "Sistema", f"Iniciando envío de '{filename}' a {user_id}"
                 )
-                self.update_queue.put(
-                    lambda: self.create_progress_bar(user_id, filename)
-                )
+                # Eliminar barras existentes para evitar duplicados
+                if file_key in self.file_progress_bars:
+                    self.remove_progress_bar(user_id, filename)
+
+                # Crear barra de progreso nueva
+                def create_bar():
+                    self.create_progress_bar(user_id, filename)
+                    self.update_progress_bar(user_id, filename, 0)
+
+                self.update_queue.put(create_bar)
+
             elif status == "progreso":
-                self.update_queue.put(
-                    lambda p=progress: self.update_progress_bar(user_id, filename, p)
-                )
+                # Actualizar la barra si existe
+                if file_key in self.file_progress_bars:
+                    self.update_queue.put(
+                        lambda p=progress: self.update_progress_bar(
+                            user_id, filename, p
+                        )
+                    )
+                else:
+                    # Si no existe, crearla y luego actualizarla
+                    def create_and_update():
+                        self.create_progress_bar(user_id, filename)
+                        self.update_progress_bar(user_id, filename, progress)
+
+                    self.update_queue.put(create_and_update)
 
                 self.status_var.set(
                     f"Enviando '{filename}' a {user_id}: {progress}% completado"
@@ -731,10 +754,21 @@ class LCPChat(tk.Tk):
                     self.update_queue.put(
                         lambda: self.append_to_chat("Tú", progress_msg, user_id)
                     )
+
             elif status == "completado":
-                self.update_queue.put(
-                    lambda: self.update_progress_bar(user_id, filename, 100)
-                )
+                # Si no existe la barra, crearla
+                if file_key not in self.file_progress_bars:
+
+                    def create_and_complete():
+                        self.create_progress_bar(user_id, filename)
+                        self.update_progress_bar(user_id, filename, 100)
+
+                    self.update_queue.put(create_and_complete)
+                else:
+                    # Si ya existe, simplemente actualizarla
+                    self.update_queue.put(
+                        lambda: self.update_progress_bar(user_id, filename, 100)
+                    )
 
                 self.append_to_chat(
                     "Sistema", f"Archivo '{filename}' enviado correctamente a {user_id}"
@@ -744,15 +778,20 @@ class LCPChat(tk.Tk):
                 self.update_queue.put(
                     lambda: self.append_to_chat("Tú", complete_msg, user_id)
                 )
-                self.after(3000, lambda: self.remove_progress_bar(user_id, filename))
 
+                # Eliminar la barra después de un tiempo
+                self.after(
+                    3000, lambda u=user_id, f=filename: self.remove_progress_bar(u, f)
+                )
                 self.status_var.set("Listo")
+
             elif status == "error":
                 self.append_to_chat(
                     "Sistema", f"Error enviando archivo '{filename}' a {user_id}"
                 )
                 self.status_var.set("Error en la transferencia")
 
+                # Eliminar cualquier barra existente
                 self.update_queue.put(
                     lambda: self.remove_progress_bar(user_id, filename)
                 )
