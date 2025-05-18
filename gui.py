@@ -1,5 +1,5 @@
-import tkinter as tk
-from tkinter import ttk, scrolledtext, filedialog, simpledialog
+import customtkinter as ctk
+from tkinter import filedialog, simpledialog
 import time
 import os
 import logging
@@ -7,6 +7,10 @@ import concurrent.futures
 import queue
 from utils import get_optimal_thread_count
 from main import Peer
+
+
+ctk.set_appearance_mode("System")
+ctk.set_default_color_theme("blue")
 
 logging.basicConfig(
     level=logging.WARNING,
@@ -16,16 +20,24 @@ logging.basicConfig(
 logger = logging.getLogger("LCP-GUI")
 
 
-class LCPChat(tk.Tk):
+class LCPChat(ctk.CTk):
     def __init__(self):
         super().__init__()
 
-        self.title("LCP Chat")
-        self.geometry("800x600")
-        self.minsize(600, 400)
+        self.title("LCP Chat 2025")
+        self.geometry("1000x700")
+        self.minsize(800, 600)
 
-        self.style = ttk.Style()
-        self.style.configure("TButton", font=("Arial", 11), padding=6)
+        # Configuración de colores
+        self.bg_color = ("#f0f0f0", "#2b2b2b")
+        self.text_color = ("#000000", "#ffffff")
+        self.button_color = ("#4a90e2", "#1f6aa5")
+        self.success_color = ("#4CAF50", "#2E7D32")
+        self.warning_color = ("#FF9800", "#F57C00")
+        self.error_color = ("#F44336", "#D32F2F")
+        self.progress_color = ("#4a90e2", "#1f6aa5")
+
+        self.sent_file_notifications = set()
 
         n, _, _ = get_optimal_thread_count()
         self.thread_pool = concurrent.futures.ThreadPoolExecutor(
@@ -45,14 +57,14 @@ class LCPChat(tk.Tk):
 
         self.current_chat = None
         self.chat_history = {}
-        self.selected_user = tk.StringVar()
+        self.selected_user = ctk.StringVar()
 
         self.file_progress_bars = {}
+        self.progress_window = None
 
         self.create_widgets()
 
         self.after(1000, self.update_ui)
-
         self.after(100, self.process_ui_updates)
 
         self.append_to_chat("Sistema", f"Bienvenido {username}!")
@@ -65,6 +77,12 @@ class LCPChat(tk.Tk):
         if hasattr(self, "thread_pool"):
             self.thread_pool.shutdown(wait=False)
 
+        if hasattr(self, "progress_window") and self.progress_window is not None:
+            try:
+                self.progress_window.destroy()
+            except:
+                pass
+
     def get_username(self):
         """Solicita un nombre de usuario al iniciar la aplicación"""
         username = simpledialog.askstring(
@@ -76,254 +94,402 @@ class LCPChat(tk.Tk):
             username = f"User{int(time.time())%1000}"
         return username
 
+    def create_progress_window(self):
+        """Crea la ventana única para mostrar todas las transferencias de archivos"""
+        # Si la ventana ya existe, no crear una nueva
+        if self.progress_window is not None:
+            if self.progress_window.winfo_exists():
+                return
+
+        # Crear ventana de progreso principal (oculta inicialmente)
+        self.progress_window = ctk.CTkToplevel(self)
+        self.progress_window.withdraw()  # Ocultar mientras se configura
+
+        self.progress_window.title("Transferencias de Archivos")
+        self.progress_window.geometry("550x400")
+        self.progress_window.resizable(True, True)
+        self.progress_window.transient(self)
+        self.progress_window.protocol("WM_DELETE_WINDOW", self.hide_progress_window)
+
+        # Frame para el título y herramientas
+        header_frame = ctk.CTkFrame(self.progress_window)
+        header_frame.pack(fill="x", padx=10, pady=(10, 0))
+
+        # Título con ícono
+        title_frame = ctk.CTkFrame(header_frame, fg_color="transparent")
+        title_frame.pack(fill="x", pady=5)
+
+        icon_label = ctk.CTkLabel(title_frame, text="📁", font=("Arial", 20))
+        icon_label.pack(side="left", padx=(5, 5))
+
+        title_label = ctk.CTkLabel(
+            title_frame,
+            text="Transferencias de Archivos",
+            font=("Arial", 16, "bold"),
+        )
+        title_label.pack(side="left", pady=5)
+
+        # Botones de herramientas
+        button_frame = ctk.CTkFrame(header_frame, fg_color="transparent")
+        button_frame.pack(fill="x", pady=5)
+
+        # Etiqueta de estado
+        self.transfer_status = ctk.CTkLabel(
+            button_frame,
+            text="Sin transferencias activas",
+            font=("Arial", 11),
+            text_color=("gray60", "gray70"),
+        )
+        self.transfer_status.pack(side="left", padx=10)
+
+        # Botón para limpiar completadas
+        clear_button = ctk.CTkButton(
+            button_frame,
+            text="Limpiar Completadas",
+            command=self.clear_completed_transfers,
+            font=("Arial", 11),
+            height=28,
+            width=30,
+            fg_color=("#3498db", "#2980b9"),
+        )
+        clear_button.pack(side="right", padx=10)
+
+        # Separador
+        separator = ctk.CTkFrame(
+            self.progress_window, height=1, fg_color=("gray80", "gray30")
+        )
+        separator.pack(fill="x", padx=10, pady=(0, 5))
+
+        # Frame contenedor para las barras de progreso (con scroll)
+        self.transfers_container = ctk.CTkScrollableFrame(self.progress_window)
+        self.transfers_container.pack(fill="both", expand=True, padx=10, pady=10)
+
+        # Actualizar todos los componentes antes de mostrar
+        self.progress_window.update_idletasks()
+
+        # Mostrar la ventana
+        self.progress_window.deiconify()
+        self.progress_window.focus_force()
+        self.progress_window.attributes("-topmost", True)
+
+    def hide_progress_window(self):
+        """Oculta la ventana de progreso en lugar de destruirla"""
+        if self.progress_window and self.progress_window.winfo_exists():
+            self.progress_window.withdraw()
+
+    def show_progress_window(self):
+        """Muestra la ventana de progreso si existe"""
+        if self.progress_window is None or not self.progress_window.winfo_exists():
+            self.create_progress_window()
+        else:
+            self.progress_window.deiconify()
+            self.progress_window.focus_force()
+            self.progress_window.attributes("-topmost", True)
+
     def create_progress_bar(self, user_id, filename):
         """Crea una barra de progreso visual para un archivo en transferencia"""
+
+        self.show_progress_window()
+
         file_key = f"{user_id}_{filename}"
 
         if file_key in self.file_progress_bars:
-            logger.debug(
-                f"Eliminando barra de progreso existente para {file_key} antes de crear una nueva"
-            )
+            logger.debug(f"Eliminando barra de progreso existente para {file_key}")
             progress_data = self.file_progress_bars[file_key]
             if "frame" in progress_data and progress_data["frame"] is not None:
                 progress_data["frame"].destroy()
             del self.file_progress_bars[file_key]
 
-        progress_frame = tk.Frame(self, bg="#f0f0f0", relief=tk.RIDGE, borderwidth=2)
-        progress_frame.pack(side=tk.BOTTOM, fill=tk.X, padx=10, pady=5)
-
-        icon_label = tk.Label(
-            progress_frame, text="📄", font=("Arial", 16), bg="#f0f0f0"
+        transfer_frame = ctk.CTkFrame(
+            self.transfers_container,
+            corner_radius=6,
+            border_width=1,
+            border_color=("gray85", "gray25"),
+            fg_color=("gray95", "gray15"),
         )
-        icon_label.pack(side=tk.LEFT, padx=(5, 0))
+        transfer_frame.pack(fill="x", pady=5, padx=5)
 
-        file_label = tk.Label(
-            progress_frame,
-            text=f"Enviando: {filename} a {user_id}",
-            font=("Arial", 10, "bold"),
-            bg="#f0f0f0",
+        header_frame = ctk.CTkFrame(transfer_frame, fg_color="transparent")
+        header_frame.pack(fill="x", pady=(8, 0), padx=5)
+
+        icon_label = ctk.CTkLabel(header_frame, text="📄", font=("Arial", 18))
+        icon_label.pack(side="left", padx=5)
+
+        short_filename = filename
+        if len(filename) > 30:
+            short_filename = filename[:27] + "..."
+
+        file_label = ctk.CTkLabel(
+            header_frame,
+            text=f"{short_filename} → {user_id}",
+            font=("Arial", 12),
+            anchor="w",
         )
-        file_label.pack(side=tk.LEFT, padx=(5, 10))
+        file_label.pack(side="left", fill="x", expand=True, padx=5)
 
-        self.style.configure(
-            f"FileTransfer.Horizontal.TProgressbar",
-            background="#4CAF50",
-            troughcolor="#e1e1e1",
-            bordercolor="#ddd",
-            lightcolor="#4CAF50",
-            darkcolor="#4CAF50",
+        close_button = ctk.CTkButton(
+            header_frame,
+            text="×",
+            width=22,
+            height=22,
+            font=("Arial", 14, "bold"),
+            fg_color=("gray75", "gray40"),
+            hover_color=("gray65", "gray30"),
+            command=lambda: self.remove_progress_bar(user_id, filename),
         )
+        close_button.pack(side="right", padx=(0, 5))
 
-        progress_bar = ttk.Progressbar(
-            progress_frame,
-            orient=tk.HORIZONTAL,
-            length=300,
-            mode="determinate",
-            style="FileTransfer.Horizontal.TProgressbar",
-        )
-        progress_bar.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 5))
-
-        percent_label = tk.Label(
-            progress_frame,
+        percent_label = ctk.CTkLabel(
+            header_frame,
             text="0%",
-            width=5,
-            font=("Arial", 10, "bold"),
-            fg="#333333",
-            bg="#f0f0f0",
+            font=("Arial", 12, "bold"),
         )
-        percent_label.pack(side=tk.LEFT, padx=(0, 10))
+        percent_label.pack(side="right", padx=(0, 8))
 
+        bar_container = ctk.CTkFrame(transfer_frame, fg_color="transparent")
+        bar_container.pack(fill="x", pady=(5, 8), padx=10)
+
+        progress_bar = ctk.CTkProgressBar(
+            bar_container,
+            orientation="horizontal",
+            mode="determinate",
+            height=15,
+            fg_color=("#E0E0E0", "#3a3a3a"),
+            progress_color=("#4a90e2", "#1f6aa5"),
+            corner_radius=2,
+        )
+        progress_bar.pack(fill="x")
+        progress_bar.set(0)
+
+        # Guardar referencias
         self.file_progress_bars[file_key] = {
-            "frame": progress_frame,
+            "frame": transfer_frame,
             "bar": progress_bar,
             "label": percent_label,
             "file_label": file_label,
             "icon": icon_label,
+            "close_button": close_button,
+            "_last_value": 0,
         }
 
-        progress_frame.update()
-        progress_frame._alpha = 0.0
-
-        def fade_in():
-            progress_frame._alpha += 0.1
-            if progress_frame._alpha < 1.0:
-                self.after(50, fade_in)
-
-        fade_in()
+        # Actualizar la ventana
+        self.progress_window.update_idletasks()
 
     def update_progress_bar(self, user_id, filename, progress):
-        """Actualiza el valor de una barra de progreso existente"""
+        """Actualiza la barra de progreso sin parpadeos"""
         file_key = f"{user_id}_{filename}"
 
         if file_key in self.file_progress_bars:
             progress_data = self.file_progress_bars[file_key]
+            self.show_progress_window()
+            if abs(progress_data["_last_value"] - progress) >= 5 or progress in [
+                0,
+                25,
+                50,
+                75,
+                100,
+            ]:
+                try:
+                    # Actualizar barra de progreso
+                    progress_data["bar"].set(progress / 100)
+                    progress_data["label"].configure(text=f"{progress}%")
+                    progress_data["_last_value"] = progress
 
-            progress_data["bar"]["value"] = progress
-            progress_data["label"].config(text=f"{progress}%")
+                    if progress < 25:
+                        progress_bar_color = ("#4a90e2", "#1f6aa5")
+                    elif progress < 50:
+                        progress_bar_color = ("#3498db", "#2980b9")
+                    elif progress < 75:
+                        progress_bar_color = ("#2ecc71", "#27ae60")
+                    elif progress < 100:
+                        progress_bar_color = ("#f39c12", "#d35400")
+                    else:
+                        progress_bar_color = ("#2ecc71", "#27ae60")
 
-            if progress < 100:
-                progress_data["file_label"].config(
-                    text=f"Enviando: {filename} a {user_id}"
-                )
-                progress_data["icon"].config(text="🔄")
-            else:
-                progress_data["file_label"].config(
-                    text=f"Completado: {filename} a {user_id}"
-                )
-                # Para transferencias completadas, usamos el ícono de completado
-                progress_data["icon"].config(text="✅")
+                    progress_data["bar"].configure(progress_color=progress_bar_color)
 
-            progress_data["frame"].update()
-        else:
-            # Si la barra no existe, mejor no hacer nada para evitar problemas
-            logger.debug(
-                f"No existe una barra de progreso para {file_key}, no se puede actualizar"
-            )
+                    if progress < 100:
+                        progress_data["file_label"].configure(
+                            text=f"{filename} → {user_id}"
+                        )
+                        progress_data["icon"].configure(text="🔄")
+                    else:
+                        progress_data["file_label"].configure(
+                            text=f"{filename} → {user_id} (Completado)"
+                        )
+                        progress_data["icon"].configure(text="✅")
+                        self.after(
+                            3000, lambda: self.remove_progress_bar(user_id, filename)
+                        )
+
+                except Exception as e:
+                    logger.debug(f"Error al actualizar barra: {e}")
+
+            if self.progress_window and self.progress_window.winfo_exists():
+                self.progress_window.update_idletasks()
 
     def remove_progress_bar(self, user_id, filename):
-        """Elimina una barra de progreso de la interfaz con efecto de desvanecer"""
+        """Elimina una barra de progreso específica"""
         file_key = f"{user_id}_{filename}"
 
         if file_key in self.file_progress_bars:
             progress_data = self.file_progress_bars[file_key]
-            frame = progress_data["frame"]
+            if "frame" in progress_data and progress_data["frame"] is not None:
+                try:
+                    progress_data["frame"].destroy()
+                except Exception:
+                    pass
+            del self.file_progress_bars[file_key]
 
-            # Para evitar problemas si se llama remove_progress_bar múltiples veces
-            if not hasattr(frame, "_is_fading_out"):
-                frame._is_fading_out = True
-                frame._alpha = 1.0
+            if not self.file_progress_bars:
 
-                def fade_out():
-                    if not hasattr(frame, "_alpha"):
-                        # La ventana ya ha sido destruida
-                        if file_key in self.file_progress_bars:
-                            del self.file_progress_bars[file_key]
-                        return
-
-                    frame._alpha -= 0.1
-                    if frame._alpha <= 0:
-                        frame.destroy()
-                        if file_key in self.file_progress_bars:
-                            del self.file_progress_bars[file_key]
-                    else:
-                        self.after(50, fade_out)
-
-                self.after(500, fade_out)
+                self.after(1000, self.hide_progress_window)
             else:
-                logger.debug(
-                    f"La barra de progreso {file_key} ya está siendo eliminada"
+
+                active_transfers = sum(
+                    1
+                    for k, v in self.file_progress_bars.items()
+                    if v.get("_last_value", 0) < 100
                 )
-        else:
-            logger.debug(
-                f"Intento de eliminar barra de progreso inexistente: {file_key}"
+                if active_transfers > 0:
+                    self.transfer_status.configure(
+                        text=f"{active_transfers} transferencias activas"
+                    )
+                else:
+                    self.transfer_status.configure(
+                        text="Todas las transferencias completadas"
+                    )
+
+    def clear_completed_transfers(self):
+        """Limpia las barras de progreso de transferencias completadas"""
+        completed_keys = []
+
+        # Identificar transferencias completadas
+        for file_key, progress_data in self.file_progress_bars.items():
+            if progress_data.get("_last_value", 0) >= 100:
+                completed_keys.append(file_key)
+
+        # Eliminar las barras de progreso completadas
+        for file_key in completed_keys:
+            parts = file_key.split("_", 1)
+            if len(parts) == 2:
+                user_id, filename = parts
+                self.remove_progress_bar(user_id, filename)
+
+        # Al limpiar las transferencias, también limpiamos las notificaciones
+        if hasattr(self, "sent_file_notifications"):
+            self.sent_file_notifications.clear()
+
+        # Actualizar estado
+        if self.file_progress_bars:
+            active_count = len(self.file_progress_bars)
+            self.transfer_status.configure(
+                text=f"{active_count} transferencias activas"
             )
+        else:
+            self.transfer_status.configure(text="Sin transferencias activas")
+            self.after(500, self.hide_progress_window)
 
     def create_widgets(self):
         """Crea los widgets de la interfaz"""
-        main_paned = ttk.PanedWindow(self, orient=tk.HORIZONTAL)
-        main_paned.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        # Configurar grid principal
+        self.grid_rowconfigure(0, weight=1)
+        self.grid_columnconfigure(1, weight=1)
 
-        users_frame = ttk.Frame(main_paned, width=200)
-        main_paned.add(users_frame, weight=1)
+        # Frame lateral para usuarios
+        self.sidebar_frame = ctk.CTkFrame(self, width=250, corner_radius=0)
+        self.sidebar_frame.grid(row=0, column=0, sticky="nsew")
+        self.sidebar_frame.grid_rowconfigure(1, weight=1)
 
-        chat_frame = ttk.Frame(main_paned)
-        main_paned.add(chat_frame, weight=3)
-
-        users_label = ttk.Label(
-            users_frame, text="Usuarios Conectados", font=("Arial", 12, "bold")
+        # Título usuarios
+        self.sidebar_label = ctk.CTkLabel(
+            self.sidebar_frame, text="Usuarios Conectados", font=("Arial", 14, "bold")
         )
-        users_label.pack(pady=5)
+        self.sidebar_label.grid(row=0, column=0, padx=20, pady=10)
 
-        self.users_list = tk.Listbox(
-            users_frame,
-            listvariable=self.selected_user,
-            selectmode=tk.SINGLE,
-            height=20,
-            font=("Arial", 15),
-        )
-        self.users_list.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
-        self.users_list.bind("<<ListboxSelect>>", self.on_user_select)
+        # Lista de usuarios
+        self.users_list = ctk.CTkScrollableFrame(self.sidebar_frame)
+        self.users_list.grid(row=1, column=0, padx=10, pady=(0, 10), sticky="nsew")
 
-        refresh_btn = tk.Button(
-            users_frame,
+        # Botón actualizar
+        self.refresh_button = ctk.CTkButton(
+            self.sidebar_frame,
             text="Actualizar",
             command=self.refresh_users,
-            font=("Arial", 15, "bold"),
-            bg="#e1e1e1",
-            fg="black",
-            padx=10,
-            pady=5,
+            font=("Arial", 12),
         )
-        refresh_btn.pack(fill=tk.X, padx=5, pady=5)
+        self.refresh_button.grid(row=2, column=0, padx=20, pady=10, sticky="ew")
 
-        chat_history_frame = ttk.Frame(chat_frame)
-        chat_history_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        # Frame principal del chat
+        self.main_frame = ctk.CTkFrame(self, corner_radius=0)
+        self.main_frame.grid(row=0, column=1, sticky="nsew")
+        self.main_frame.grid_rowconfigure(0, weight=1)
+        self.main_frame.grid_columnconfigure(0, weight=1)
 
-        self.chat_display = scrolledtext.ScrolledText(
-            chat_history_frame,
-            wrap=tk.WORD,
-            state="disabled",
-            height=20,
-            font=("Arial", 15),
+        # Área de chat
+        self.chat_display = ctk.CTkTextbox(
+            self.main_frame, wrap="word", state="disabled", font=("Arial", 14)
         )
-        self.chat_display.pack(fill=tk.BOTH, expand=True)
+        self.chat_display.grid(row=0, column=0, padx=10, pady=10, sticky="nsew")
 
-        input_frame = ttk.Frame(chat_frame)
-        input_frame.pack(fill=tk.X, padx=5, pady=5)
+        # Frame de entrada de mensaje
+        self.input_frame = ctk.CTkFrame(self.main_frame, height=50)
+        self.input_frame.grid(row=1, column=0, padx=10, pady=(0, 10), sticky="ew")
+        self.input_frame.grid_columnconfigure(0, weight=1)
 
-        self.message_input = ttk.Entry(input_frame, font=("Arial", 20))
-        self.message_input.pack(fill=tk.X, side=tk.LEFT, expand=True, padx=(0, 5))
+        # Entrada de mensaje
+        self.message_input = ctk.CTkEntry(
+            self.input_frame,
+            placeholder_text="Escribe tu mensaje aquí...",
+            font=("Arial", 14),
+        )
+        self.message_input.grid(row=0, column=0, padx=(0, 5), sticky="ew")
         self.message_input.bind("<Return>", self.send_message)
 
-        buttons_frame = ttk.Frame(chat_frame)
-        buttons_frame.pack(fill=tk.X, pady=5)
-
-        send_btn = tk.Button(
-            buttons_frame,
+        # Botón enviar
+        self.send_button = ctk.CTkButton(
+            self.input_frame,
             text="Enviar",
             command=self.send_message,
-            bg="#4CAF50",
-            fg="black",
-            font=("Arial", 15, "bold"),
-            padx=15,
-            pady=5,
+            width=80,
+            font=("Arial", 12),
         )
-        send_btn.pack(side=tk.LEFT, padx=5)
+        self.send_button.grid(row=0, column=1, padx=(0, 5))
 
-        broadcast_btn = tk.Button(
-            buttons_frame,
+        # Frame de botones adicionales
+        self.buttons_frame = ctk.CTkFrame(self.main_frame)
+        self.buttons_frame.grid(row=2, column=0, padx=10, pady=(0, 10), sticky="ew")
+
+        # Botón broadcast
+        self.broadcast_button = ctk.CTkButton(
+            self.buttons_frame,
             text="Enviar a Todos",
             command=self.send_broadcast,
-            bg="#FF9800",
-            fg="black",
-            font=("Arial", 15, "bold"),
-            padx=15,
-            pady=5,
+            fg_color=self.warning_color,
+            font=("Arial", 12),
         )
-        broadcast_btn.pack(side=tk.LEFT, padx=5)
+        self.broadcast_button.pack(side="left", padx=5, pady=5, fill="x", expand=True)
 
-        file_btn = tk.Button(
-            buttons_frame,
+        # Botón archivo
+        self.file_button = ctk.CTkButton(
+            self.buttons_frame,
             text="Enviar Archivo",
             command=self.send_file,
-            bg="#2196F3",
-            fg="black",
-            font=("Arial", 15, "bold"),
-            padx=15,
-            pady=5,
+            font=("Arial", 12),
         )
-        file_btn.pack(side=tk.LEFT, padx=5)
+        self.file_button.pack(side="left", padx=5, pady=5, fill="x", expand=True)
 
-        self.status_var = tk.StringVar()
-        self.status_var.set("Listo")
-        status_bar = ttk.Label(
+        # Barra de estado
+        self.status_var = ctk.StringVar()
+        self.status_var.set("Conectando...")
+        self.status_bar = ctk.CTkLabel(
             self,
             textvariable=self.status_var,
-            relief=tk.SUNKEN,
-            anchor=tk.W,
-            font=("Arial", 10),
+            anchor="w",
+            font=("Arial", 11),
+            corner_radius=0,
         )
-        status_bar.pack(side=tk.BOTTOM, fill=tk.X)
+        self.status_bar.grid(row=1, column=0, columnspan=2, sticky="ew")
 
     def update_ui(self):
         """Actualiza periódicamente la interfaz"""
@@ -347,47 +513,42 @@ class LCPChat(tk.Tk):
                 f"Se filtraron {len(all_peers) - len(peers)} peers con nombres vacíos"
             )
 
-        current_selection = None
-        if self.users_list.curselection():
-            current_selection = self.users_list.get(self.users_list.curselection()[0])
+        # Limpiar lista actual
+        for widget in self.users_list.winfo_children():
+            widget.destroy()
 
-        self.users_list.delete(0, tk.END)
-        for peer_id in peers:
-            self.users_list.insert(tk.END, peer_id)
-
-        if current_selection:
-            try:
-                idx = peers.index(current_selection)
-                self.users_list.selection_set(idx)
-                self.users_list.see(idx)
-            except ValueError:
-                self.current_chat = None
+        # Agregar usuarios
+        for i, peer_id in enumerate(peers):
+            user_btn = ctk.CTkButton(
+                self.users_list,
+                text=peer_id,
+                command=lambda p=peer_id: self.select_user(p),
+                anchor="w",
+                font=("Arial", 12),
+                fg_color="transparent",
+                hover_color=("#e1e1e1", "#3a3a3a"),
+            )
+            user_btn.pack(fill="x", pady=2)
 
         self.status_var.set(f"Conectados: {len(peers)} usuarios")
 
-    def on_user_select(self, event):
-        """Maneja la selección de un usuario de la lista"""
-        if not self.users_list.curselection():
-            return
-
-        selected_idx = self.users_list.curselection()[0]
-        selected_user = self.users_list.get(selected_idx)
-
-        self.current_chat = selected_user
-        self.update_queue.put(lambda u=selected_user: self.display_chat_history(u))
+    def select_user(self, user_id):
+        """Selecciona un usuario para chatear"""
+        self.current_chat = user_id
+        self.display_chat_history(user_id)
 
     def display_chat_history(self, user_id):
         """Muestra el historial de chat con un usuario"""
         try:
             self.chat_display.configure(state="normal")
-            self.chat_display.delete(1.0, tk.END)
+            self.chat_display.delete("1.0", "end")
 
             if user_id in self.chat_history:
                 history_text = "\n".join(self.chat_history[user_id]) + "\n"
-                self.chat_display.insert(tk.END, history_text)
+                self.chat_display.insert("end", history_text)
 
             self.chat_display.configure(state="disabled")
-            self.chat_display.see(tk.END)
+            self.chat_display.see("end")
 
             self.status_var.set(f"Chat con: {user_id}")
             if user_id != "Sistema" and user_id != "Broadcast" and user_id != "Tú":
@@ -396,13 +557,7 @@ class LCPChat(tk.Tk):
             logger.error(f"Error al mostrar historial de chat: {e}", exc_info=True)
 
     def append_to_chat(self, user_id, message, chat_id=None):
-        """Añade un mensaje al historial y lo muestra si es el chat actual
-
-        Args:
-            user_id: Emisor del mensaje ("Tú", "Sistema" o ID de otro usuario)
-            message: Contenido del mensaje
-            chat_id: ID de chat donde agregar el mensaje (para mensajes enviados por mí a otros)
-        """
+        """Añade un mensaje al historial y lo muestra si es el chat actual"""
         try:
             timestamp = time.strftime("%H:%M:%S")
             if user_id == "Tú":
@@ -420,9 +575,9 @@ class LCPChat(tk.Tk):
 
                 if self.current_chat == chat_id:
                     self.chat_display.configure(state="normal")
-                    self.chat_display.insert(tk.END, f"{formatted_msg}\n")
+                    self.chat_display.insert("end", f"{formatted_msg}\n")
                     self.chat_display.configure(state="disabled")
-                    self.chat_display.see(tk.END)
+                    self.chat_display.see("end")
 
             if user_id not in self.chat_history:
                 self.chat_history[user_id] = []
@@ -432,9 +587,9 @@ class LCPChat(tk.Tk):
 
             if self.current_chat == user_id or user_id == "Sistema":
                 self.chat_display.configure(state="normal")
-                self.chat_display.insert(tk.END, f"{formatted_msg}\n")
+                self.chat_display.insert("end", f"{formatted_msg}\n")
                 self.chat_display.configure(state="disabled")
-                self.chat_display.see(tk.END)
+                self.chat_display.see("end")
 
                 if user_id != "Tú" and user_id != "Sistema":
                     self.status_var.set(f"✉️ Mensaje nuevo de {user_id}")
@@ -471,7 +626,7 @@ class LCPChat(tk.Tk):
             return
 
         current_chat = self.current_chat
-        self.message_input.delete(0, tk.END)
+        self.message_input.delete(0, "end")
 
         self.status_var.set(f"Enviando mensaje a {current_chat}...")
 
@@ -511,12 +666,12 @@ class LCPChat(tk.Tk):
             )
 
     def send_broadcast(self):
-        """Envía un mensaje a todos los usuarios conectados a la vez con una única transmisión"""
+        """Envía un mensaje a todos los usuarios conectados"""
         message = self.message_input.get().strip()
         if not message:
             return
 
-        self.message_input.delete(0, tk.END)
+        self.message_input.delete(0, "end")
 
         timestamp = time.strftime("%H:%M:%S")
         broadcast_msg = f"[{timestamp}] Tú (Broadcast): {message}"
@@ -533,50 +688,24 @@ class LCPChat(tk.Tk):
 
         if self.current_chat == "Broadcast" or self.current_chat == "Sistema":
             self.chat_display.configure(state="normal")
-            self.chat_display.insert(tk.END, f"{broadcast_msg}\n")
+            self.chat_display.insert("end", f"{broadcast_msg}\n")
             self.chat_display.configure(state="disabled")
-            self.chat_display.see(tk.END)
+            self.chat_display.see("end")
         elif self.current_chat in peers:
             self.chat_display.configure(state="normal")
-            self.chat_display.insert(tk.END, f"{broadcast_msg}\n")
+            self.chat_display.insert("end", f"{broadcast_msg}\n")
             self.chat_display.configure(state="disabled")
-            self.chat_display.see(tk.END)
+            self.chat_display.see("end")
 
         self.status_var.set("Enviando mensaje broadcast...")
-
         self.append_to_chat("Sistema", f'Enviando a todos: "{message}"')
 
         self.thread_pool.submit(self._send_broadcast_thread, message)
 
     def _send_broadcast_thread(self, message):
-        """Ejecuta el envío de mensajes broadcast en un hilo separado con reintentos"""
-
-        # Definir callbacks para monitorear el progreso de los reintentos
-        def retry_callback(attempt, max_attempts):
-            """Callback para actualizar la interfaz sobre el estado de los reintentos"""
-            self.update_queue.put(
-                lambda: self.status_var.set(
-                    f"Reintentando envío de mensaje broadcast ({attempt}/{max_attempts})..."
-                )
-            )
-            self.update_queue.put(
-                lambda: self.append_to_chat(
-                    "Sistema",
-                    f"🔄 Reintentando envío de mensaje broadcast ({attempt}/{max_attempts})...",
-                )
-            )
-
+        """Ejecuta el envío de mensajes broadcast en un hilo separado"""
         try:
-            # Primero indicamos que se está enviando el mensaje
-            self.update_queue.put(
-                lambda: self.status_var.set("Enviando mensaje a todos los usuarios...")
-            )
-
-            # Número máximo de reintentos para la transmisión broadcast
-            max_retries = 3
-
-            # Llamamos a la función con los reintentos configurados
-            success = self.peer.broadcast_message(message, max_retries=max_retries)
+            success = self.peer.broadcast_message(message, max_retries=3)
 
             if success:
                 self.update_queue.put(
@@ -636,7 +765,6 @@ class LCPChat(tk.Tk):
             return
 
         self.status_var.set(f"Preparando envío de archivo a {current_chat}...")
-
         self.thread_pool.submit(self._send_file_thread, current_chat, filepath)
 
     def _send_file_thread(self, user_to, filepath):
@@ -644,14 +772,24 @@ class LCPChat(tk.Tk):
         try:
             filename = os.path.basename(filepath)
 
-            self.update_queue.put(
-                lambda: self.append_to_chat(
-                    "Sistema", f"Iniciando envío de archivo: {filename} a {user_to}"
+            clean_user_to = user_to.strip() if isinstance(user_to, str) else user_to
+
+            notification_id = f"start_{clean_user_to}_{filename}"
+
+            if notification_id not in self.sent_file_notifications:
+                self.update_queue.put(
+                    lambda: self.append_to_chat(
+                        "Sistema",
+                        f"Iniciando envío de archivo: {filename} a {clean_user_to}",
+                    )
                 )
-            )
+
+                self.sent_file_notifications.add(notification_id)
 
             file_msg = f"Enviando archivo: {filename}"
-            self.update_queue.put(lambda: self.append_to_chat("Tú", file_msg, user_to))
+            self.update_queue.put(
+                lambda: self.append_to_chat("Tú", file_msg, clean_user_to)
+            )
 
             success = self.peer.send_file(user_to, filepath)
 
@@ -664,7 +802,6 @@ class LCPChat(tk.Tk):
                 self.update_queue.put(
                     lambda: self.status_var.set("Error al enviar archivo")
                 )
-
                 self.update_queue.put(
                     lambda: self.remove_progress_bar(user_to, filename)
                 )
@@ -690,9 +827,6 @@ class LCPChat(tk.Tk):
                 lambda u=user_from, m=message: self.append_to_chat(u, m)
             )
 
-            if user_from == self.current_chat:
-                pass
-
             logger.info(f"Mensaje de {user_from} procesado correctamente")
         except Exception as e:
             logger.error(
@@ -702,34 +836,37 @@ class LCPChat(tk.Tk):
     def on_file(self, user_from, file_path):
         """Callback para archivos recibidos"""
         try:
+            # Limpiar el ID para evitar duplicados por espacios
+            clean_user_from = (
+                user_from.strip() if isinstance(user_from, str) else user_from
+            )
             filename = os.path.basename(file_path)
 
-            self.status_var.set(f"✉️ Archivo recibido de {user_from}: {filename}")
+            self.status_var.set(f"✉️ Archivo recibido de {clean_user_from}: {filename}")
 
-            # Mostrar una barra de progreso completada inmediatamente
-            file_key = f"{user_from}_{filename}"
+            file_key = f"{clean_user_from}_{filename}"
 
-            # Eliminar barras existentes para evitar duplicados
-            if file_key in self.file_progress_bars:
-                self.update_queue.put(
-                    lambda: self.remove_progress_bar(user_from, filename)
-                )
-
-            # Crear una nueva barra ya completada
             def create_completed_bar():
-                self.create_progress_bar(user_from, filename)
-                self.update_progress_bar(user_from, filename, 100)
+                self.show_progress_window()
+                self.create_progress_bar(clean_user_from, filename)
+                self.update_progress_bar(clean_user_from, filename, 100)
 
             self.update_queue.put(create_completed_bar)
 
-            self.append_to_chat(
-                "Sistema", f"Archivo recibido de {user_from}: {filename}"
-            )
-            self.append_to_chat("Sistema", f"Guardado como: {file_path}")
-            file_msg = f"Archivo recibido: {filename}"
-            self.append_to_chat(user_from, file_msg)
+            # Generamos un ID único para este mensaje de archivo recibido
+            notification_id = f"received_{clean_user_from}_{filename}"
 
-            self.after(3000, lambda: self.remove_progress_bar(user_from, filename))
+            # Solo notificar si no se ha notificado antes
+            if notification_id not in self.sent_file_notifications:
+                self.append_to_chat(
+                    "Sistema", f"Archivo recibido de {clean_user_from}: {filename}"
+                )
+                self.append_to_chat("Sistema", f"Guardado como: {file_path}")
+                file_msg = f"Archivo recibido: {filename}"
+                self.append_to_chat(clean_user_from, file_msg)
+
+                # Marcar como notificado
+                self.sent_file_notifications.add(notification_id)
 
         except Exception as e:
             logger.error(f"Error procesando archivo recibido: {e}", exc_info=True)
@@ -750,91 +887,92 @@ class LCPChat(tk.Tk):
     def on_file_progress(self, user_id, file_path, progress, status):
         """Callback para actualizaciones de progreso de transferencias"""
         try:
+            clean_user_id = user_id.strip() if isinstance(user_id, str) else user_id
             filename = os.path.basename(file_path)
-            file_key = f"{user_id}_{filename}"
+            file_key = f"{clean_user_id}_{filename}"
 
-            # Gestión centralizada de barras de progreso
             if status == "iniciando":
-                self.append_to_chat(
-                    "Sistema", f"Iniciando envío de '{filename}' a {user_id}"
-                )
-                # Eliminar barras existentes para evitar duplicados
-                if file_key in self.file_progress_bars:
-                    self.remove_progress_bar(user_id, filename)
+                # No mostramos el mensaje de inicio aquí para evitar duplicaciones,
+                # ya se muestra en _send_file_thread
 
-                # Crear barra de progreso nueva
-                def create_bar():
-                    self.create_progress_bar(user_id, filename)
-                    self.update_progress_bar(user_id, filename, 0)
+                if file_key not in self.file_progress_bars:
+                    self.update_queue.put(
+                        lambda: self.create_progress_bar(clean_user_id, filename)
+                    )
 
-                self.update_queue.put(create_bar)
+                    def update_status():
+                        active_count = len(self.file_progress_bars)
+                        if hasattr(self, "transfer_status"):
+                            self.transfer_status.configure(
+                                text=f"{active_count} transferencias activas"
+                            )
+
+                    self.update_queue.put(update_status)
+                else:
+                    self.update_queue.put(
+                        lambda: self.update_progress_bar(clean_user_id, filename, 0)
+                    )
 
             elif status == "progreso":
-                # Actualizar la barra si existe
-                if file_key in self.file_progress_bars:
-                    self.update_queue.put(
-                        lambda p=progress: self.update_progress_bar(
-                            user_id, filename, p
-                        )
-                    )
-                else:
-                    # Si no existe, crearla y luego actualizarla
+                if file_key not in self.file_progress_bars:
+
                     def create_and_update():
-                        self.create_progress_bar(user_id, filename)
-                        self.update_progress_bar(user_id, filename, progress)
+                        self.create_progress_bar(clean_user_id, filename)
+                        self.update_progress_bar(clean_user_id, filename, progress)
 
                     self.update_queue.put(create_and_update)
-
-                self.status_var.set(
-                    f"Enviando '{filename}' a {user_id}: {progress}% completado"
-                )
-
-                if progress in [25, 50, 75, 100]:
-                    progress_msg = f"Progreso de envío: {progress}%"
+                else:
                     self.update_queue.put(
-                        lambda: self.append_to_chat("Tú", progress_msg, user_id)
+                        lambda p=progress: self.update_progress_bar(
+                            clean_user_id, filename, p
+                        )
                     )
 
+                self.status_var.set(
+                    f"Enviando '{filename}' a {clean_user_id}: {progress}% completado"
+                )
+
             elif status == "completado":
-                # Si no existe la barra, crearla
                 if file_key not in self.file_progress_bars:
 
                     def create_and_complete():
-                        self.create_progress_bar(user_id, filename)
-                        self.update_progress_bar(user_id, filename, 100)
+                        self.create_progress_bar(clean_user_id, filename)
+                        self.update_progress_bar(clean_user_id, filename, 100)
 
                     self.update_queue.put(create_and_complete)
                 else:
-                    # Si ya existe, simplemente actualizarla
                     self.update_queue.put(
-                        lambda: self.update_progress_bar(user_id, filename, 100)
+                        lambda: self.update_progress_bar(clean_user_id, filename, 100)
                     )
 
-                self.append_to_chat(
-                    "Sistema", f"Archivo '{filename}' enviado correctamente a {user_id}"
+                # Generamos un ID único para este mensaje de completado
+                notification_id = f"complete_{clean_user_id}_{filename}"
+                msg_text = (
+                    f"Archivo '{filename}' enviado correctamente a {clean_user_id}"
                 )
 
-                complete_msg = f"Archivo '{filename}' enviado correctamente"
-                self.update_queue.put(
-                    lambda: self.append_to_chat("Tú", complete_msg, user_id)
-                )
+                # Verificamos si ya se envió este mensaje antes
+                if notification_id not in self.sent_file_notifications:
+                    self.append_to_chat("Sistema", msg_text)
+                    # Marcamos como enviado para no repetirlo
+                    self.sent_file_notifications.add(notification_id)
 
-                # Eliminar la barra después de un tiempo
-                self.after(
-                    3000, lambda u=user_id, f=filename: self.remove_progress_bar(u, f)
-                )
+                    # Limpiamos notificaciones antiguas si hay muchas (más de 50)
+                    if len(self.sent_file_notifications) > 50:
+                        self.sent_file_notifications.clear()
+
                 self.status_var.set("Listo")
 
             elif status == "error":
                 self.append_to_chat(
-                    "Sistema", f"Error enviando archivo '{filename}' a {user_id}"
+                    "Sistema", f"Error enviando archivo '{filename}' a {clean_user_id}"
                 )
                 self.status_var.set("Error en la transferencia")
+                if file_key in self.file_progress_bars:
+                    self.update_queue.put(
+                        lambda: self.remove_progress_bar(clean_user_id, filename)
+                    )
 
-                # Eliminar cualquier barra existente
-                self.update_queue.put(
-                    lambda: self.remove_progress_bar(user_id, filename)
-                )
         except Exception as e:
             logger.error(f"Error en callback de progreso: {e}", exc_info=True)
 
