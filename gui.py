@@ -513,22 +513,28 @@ class LCPChat(ctk.CTk):
                 f"Se filtraron {len(all_peers) - len(peers)} peers con nombres vacíos"
             )
 
-        # Limpiar lista actual
         for widget in self.users_list.winfo_children():
             widget.destroy()
 
-        # Agregar usuarios
         for i, peer_id in enumerate(peers):
+            is_selected = self.current_chat == peer_id
+
             user_btn = ctk.CTkButton(
                 self.users_list,
                 text=peer_id,
                 command=lambda p=peer_id: self.select_user(p),
                 anchor="w",
-                font=("Arial", 12),
-                fg_color="transparent",
-                hover_color=("#e1e1e1", "#3a3a3a"),
+                font=("Arial", 12, "bold" if is_selected else "normal"),
+                fg_color=("#4a90e2", "#1f6aa5") if is_selected else "transparent",
+                text_color=("#ffffff", "#ffffff") if is_selected else None,
+                hover_color=(
+                    ("#3a80d2", "#155995") if is_selected else ("#e1e1e1", "#3a3a3a")
+                ),
             )
             user_btn.pack(fill="x", pady=2)
+
+            if is_selected:
+                self.selected_user_btn = user_btn
 
         self.status_var.set(f"Conectados: {len(peers)} usuarios")
 
@@ -536,6 +542,8 @@ class LCPChat(ctk.CTk):
         """Selecciona un usuario para chatear"""
         self.current_chat = user_id
         self.display_chat_history(user_id)
+
+        self.refresh_users()
 
     def display_chat_history(self, user_id):
         """Muestra el historial de chat con un usuario"""
@@ -892,8 +900,6 @@ class LCPChat(ctk.CTk):
             file_key = f"{clean_user_id}_{filename}"
 
             if status == "iniciando":
-                # No mostramos el mensaje de inicio aquí para evitar duplicaciones,
-                # ya se muestra en _send_file_thread
 
                 if file_key not in self.file_progress_bars:
                     self.update_queue.put(
