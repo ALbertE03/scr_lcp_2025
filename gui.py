@@ -96,14 +96,23 @@ class LCPChat(ctk.CTk):
 
     def create_progress_window(self):
         """Crea la ventana única para mostrar todas las transferencias de archivos"""
-        # Si la ventana ya existe, no crear una nueva
-        if self.progress_window is not None:
-            if self.progress_window.winfo_exists():
-                return
+        if hasattr(self, "progress_window") and self.progress_window is not None:
+            try:
+                if self.progress_window.winfo_exists():
+                    return
+            except Exception:
+                logger.warning(
+                    "Error al verificar existencia de progress_window, creando nuevo"
+                )
+                pass
 
-        # Crear ventana de progreso principal (oculta inicialmente)
-        self.progress_window = ctk.CTkToplevel(self)
-        self.progress_window.withdraw()  # Ocultar mientras se configura
+        try:
+            self.progress_window = ctk.CTkToplevel(self)
+            self.progress_window.withdraw()
+        except Exception as e:
+            logger.error(f"Error al crear progress_window: {e}")
+            self.progress_window = None
+            return
 
         self.progress_window.title("Transferencias de Archivos")
         self.progress_window.geometry("550x400")
@@ -160,7 +169,6 @@ class LCPChat(ctk.CTk):
         )
         separator.pack(fill="x", padx=10, pady=(0, 5))
 
-        # Frame contenedor para las barras de progreso (con scroll)
         self.transfers_container = ctk.CTkScrollableFrame(self.progress_window)
         self.transfers_container.pack(fill="both", expand=True, padx=10, pady=10)
 
@@ -174,12 +182,20 @@ class LCPChat(ctk.CTk):
 
     def hide_progress_window(self):
         """Oculta la ventana de progreso en lugar de destruirla"""
-        if self.progress_window and self.progress_window.winfo_exists():
+        if (
+            hasattr(self, "progress_window")
+            and self.progress_window
+            and self.progress_window.winfo_exists()
+        ):
             self.progress_window.withdraw()
 
     def show_progress_window(self):
         """Muestra la ventana de progreso si existe"""
-        if self.progress_window is None or not self.progress_window.winfo_exists():
+        if (
+            not hasattr(self, "progress_window")
+            or self.progress_window is None
+            or not self.progress_window.winfo_exists()
+        ):
             self.create_progress_window()
         else:
             self.progress_window.deiconify()
@@ -548,6 +564,11 @@ class LCPChat(ctk.CTk):
     def display_chat_history(self, user_id):
         """Muestra el historial de chat con un usuario"""
         try:
+            # Verificar si chat_display existe antes de usarlo
+            if not hasattr(self, "chat_display"):
+                logger.warning("chat_display no existe al intentar mostrar historial")
+                return
+
             self.chat_display.configure(state="normal")
             self.chat_display.delete("1.0", "end")
 
@@ -558,7 +579,9 @@ class LCPChat(ctk.CTk):
             self.chat_display.configure(state="disabled")
             self.chat_display.see("end")
 
-            self.status_var.set(f"Chat con: {user_id}")
+            if hasattr(self, "status_var"):
+                self.status_var.set(f"Chat con: {user_id}")
+
             if user_id != "Sistema" and user_id != "Broadcast" and user_id != "Tú":
                 logger.info(f"Mensajes de {user_id} marcados como leídos")
         except Exception as e:
@@ -581,11 +604,14 @@ class LCPChat(ctk.CTk):
                     logger.info(f"Creado nuevo historial para {chat_id}")
                 self.chat_history[chat_id].append(formatted_msg)
 
-                if self.current_chat == chat_id:
-                    self.chat_display.configure(state="normal")
-                    self.chat_display.insert("end", f"{formatted_msg}\n")
-                    self.chat_display.configure(state="disabled")
-                    self.chat_display.see("end")
+                if self.current_chat == chat_id and hasattr(self, "chat_display"):
+                    try:
+                        self.chat_display.configure(state="normal")
+                        self.chat_display.insert("end", f"{formatted_msg}\n")
+                        self.chat_display.configure(state="disabled")
+                        self.chat_display.see("end")
+                    except Exception as e:
+                        logger.error(f"Error al actualizar chat_display: {e}")
 
             if user_id not in self.chat_history:
                 self.chat_history[user_id] = []
@@ -593,16 +619,29 @@ class LCPChat(ctk.CTk):
 
             self.chat_history[user_id].append(formatted_msg)
 
-            if self.current_chat == user_id or user_id == "Sistema":
-                self.chat_display.configure(state="normal")
-                self.chat_display.insert("end", f"{formatted_msg}\n")
-                self.chat_display.configure(state="disabled")
-                self.chat_display.see("end")
+            if (self.current_chat == user_id or user_id == "Sistema") and hasattr(
+                self, "chat_display"
+            ):
+                try:
+                    self.chat_display.configure(state="normal")
+                    self.chat_display.insert("end", f"{formatted_msg}\n")
+                    self.chat_display.configure(state="disabled")
+                    self.chat_display.see("end")
 
-                if user_id != "Tú" and user_id != "Sistema":
-                    self.status_var.set(f"✉️ Mensaje nuevo de {user_id}")
+                    if (
+                        user_id != "Tú"
+                        and user_id != "Sistema"
+                        and hasattr(self, "status_var")
+                    ):
+                        self.status_var.set(f"✉️ Mensaje nuevo de {user_id}")
+                except Exception as e:
+                    logger.error(f"Error al actualizar chat_display: {e}")
             else:
-                if user_id != "Sistema" and user_id != "Tú":
+                if (
+                    user_id != "Sistema"
+                    and user_id != "Tú"
+                    and hasattr(self, "status_var")
+                ):
                     self.status_var.set(f"✉️ Mensaje nuevo sin leer de {user_id}")
                     logger.info(
                         f"Mensaje pendiente de {user_id} (chat actual: {self.current_chat})"
@@ -830,7 +869,11 @@ class LCPChat(ctk.CTk):
         """Callback para mensajes recibidos"""
         logger.info(f"MENSAJE RECIBIDO de {user_from}: {message[:50]}...")
         try:
-            self.status_var.set(f"✉️ Nuevo mensaje de {user_from}")
+            # Verificar si existe status_var antes de usarlo
+            if hasattr(self, "status_var"):
+                self.status_var.set(f"✉️ Nuevo mensaje de {user_from}")
+
+            # Poner en cola para proceso seguro en el thread principal
             self.update_queue.put(
                 lambda u=user_from, m=message: self.append_to_chat(u, m)
             )
@@ -900,6 +943,8 @@ class LCPChat(ctk.CTk):
             file_key = f"{clean_user_id}_{filename}"
 
             if status == "iniciando":
+                if not hasattr(self, "progress_window") or self.progress_window is None:
+                    self.update_queue.put(lambda: self.create_progress_window())
 
                 if file_key not in self.file_progress_bars:
                     self.update_queue.put(
@@ -909,9 +954,14 @@ class LCPChat(ctk.CTk):
                     def update_status():
                         active_count = len(self.file_progress_bars)
                         if hasattr(self, "transfer_status"):
-                            self.transfer_status.configure(
-                                text=f"{active_count} transferencias activas"
-                            )
+                            try:
+                                self.transfer_status.configure(
+                                    text=f"{active_count} transferencias activas"
+                                )
+                            except Exception as e:
+                                logger.warning(
+                                    f"Error al actualizar estado de transferencias: {e}"
+                                )
 
                     self.update_queue.put(update_status)
                 else:
