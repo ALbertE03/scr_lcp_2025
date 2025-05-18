@@ -549,9 +549,34 @@ class LCPChat(tk.Tk):
         self.thread_pool.submit(self._send_broadcast_thread, message)
 
     def _send_broadcast_thread(self, message):
-        """Ejecuta el envío de mensajes broadcast en un hilo separado"""
+        """Ejecuta el envío de mensajes broadcast en un hilo separado con reintentos"""
+
+        # Definir callbacks para monitorear el progreso de los reintentos
+        def retry_callback(attempt, max_attempts):
+            """Callback para actualizar la interfaz sobre el estado de los reintentos"""
+            self.update_queue.put(
+                lambda: self.status_var.set(
+                    f"Reintentando envío de mensaje broadcast ({attempt}/{max_attempts})..."
+                )
+            )
+            self.update_queue.put(
+                lambda: self.append_to_chat(
+                    "Sistema",
+                    f"🔄 Reintentando envío de mensaje broadcast ({attempt}/{max_attempts})...",
+                )
+            )
+
         try:
-            success = self.peer.broadcast_message(message)
+            # Primero indicamos que se está enviando el mensaje
+            self.update_queue.put(
+                lambda: self.status_var.set("Enviando mensaje a todos los usuarios...")
+            )
+
+            # Número máximo de reintentos para la transmisión broadcast
+            max_retries = 3
+
+            # Llamamos a la función con los reintentos configurados
+            success = self.peer.broadcast_message(message, max_retries=max_retries)
 
             if success:
                 self.update_queue.put(
@@ -561,13 +586,15 @@ class LCPChat(tk.Tk):
                 )
                 self.update_queue.put(
                     lambda: self.append_to_chat(
-                        "Sistema", "✓ Mensaje enviado a todos los usuarios"
+                        "Sistema",
+                        "✅ Mensaje enviado a todos los usuarios correctamente",
                     )
                 )
             else:
                 self.update_queue.put(
                     lambda: self.append_to_chat(
-                        "Sistema", "❌ Error enviando mensaje broadcast"
+                        "Sistema",
+                        "❌ Error enviando mensaje broadcast después de varios intentos",
                     )
                 )
                 self.update_queue.put(
@@ -679,8 +706,21 @@ class LCPChat(tk.Tk):
 
             self.status_var.set(f"✉️ Archivo recibido de {user_from}: {filename}")
 
-            # Solo mostrar el archivo recibido sin crear barra de progreso
-            # ya que el archivo ya se recibió completo
+            # Mostrar una barra de progreso completada inmediatamente
+            file_key = f"{user_from}_{filename}"
+
+            # Eliminar barras existentes para evitar duplicados
+            if file_key in self.file_progress_bars:
+                self.update_queue.put(
+                    lambda: self.remove_progress_bar(user_from, filename)
+                )
+
+            # Crear una nueva barra ya completada
+            def create_completed_bar():
+                self.create_progress_bar(user_from, filename)
+                self.update_progress_bar(user_from, filename, 100)
+
+            self.update_queue.put(create_completed_bar)
 
             self.append_to_chat(
                 "Sistema", f"Archivo recibido de {user_from}: {filename}"

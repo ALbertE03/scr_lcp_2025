@@ -472,16 +472,17 @@ class Peer:
                 except Exception as e:
                     logger.debug(f"Error verificando si es un cuerpo de mensaje: {e}")
 
-            if len(data) > 100:
+            """if len(data) > 100:
                 return self._send_response(addr, RESPONSE_BAD_REQUEST)
             elif len(data) < 100:
                 logger.warning(
                     f"Recibido mensaje UDP con formato desconocido desde {addr[0]}:{addr[1]} (tamaño: {len(data)} bytes)"
                 )
-                return self._send_response(addr, RESPONSE_BAD_REQUEST)
+                return self._send_response(addr, RESPONSE_BAD_REQUEST)"""
 
             header = self._parse_header(data)
-
+            if not header:
+                return
             sender_id = self._normalize_user_id(header["user_from"])
             my_id = self._normalize_user_id(self.user_id_str)
 
@@ -1548,74 +1549,119 @@ class Peer:
             self.udp_socket.settimeout(None)
             logger.debug(f"{worker_name} Socket UDP restaurado a modo no bloqueante")
 
-    def broadcast_message(self, message):
+    def broadcast_message(self, message, max_retries=3, retry_delay=1.0):
         """Envía un mensaje a todos los peers con una única transmisión.
-        Esto implementa la funcionalidad de mensajería uno-a-muchos.
-
         Args:
             message: Mensaje a enviar a todos los peers
+            max_retries: Número máximo de reintentos si falla el envío (default: 3)
+            retry_delay: Tiempo de espera entre reintentos en segundos (default: 1.0)
 
         Returns:
-            bool: True si el mensaje fue enviado, False en caso de error
+            bool: True si el mensaje fue enviado correctamente, False en caso de error
         """
-        logger.info(f"Iniciando envío de mensaje broadcast: {message[:50]}...")
+        logger.info(
+            f"Iniciando envío de mensaje broadcast con reintentos: {message[:50]}..."
+        )
         message_id = int(time.time() * 1000) % 256
         message_bytes = message.encode("utf-8")
+        broadcast_addresses = get_network_info()
+
+        # Header y body que se enviarán
+        header = self._build_header(None, MESSAGE, message_id, len(message_bytes))
+        body = message_id.to_bytes(8, "big") + message_bytes
 
         logger.info(
             f"Enviando broadcast (message_id: {message_id}, tamaño: {len(message_bytes)} bytes)"
         )
 
-        try:
-            # Fase 1: Enviar header con destino broadcast
-            header = self._build_header(None, MESSAGE, message_id, len(message_bytes))
-            logger.info("FASE 1: Enviando header LCP broadcast")
+        retry_count = 0
+        success = False
 
-            broadcast_addresses = get_network_info()
-            success = False
+        while retry_count <= max_retries and not success:
 
-            with self._udp_socket_lock:
-                for broadcast_addr in broadcast_addresses:
-                    try:
-                        self.udp_socket.sendto(header, (broadcast_addr, UDP_PORT))
-                        logger.info(
-                            f"Header broadcast enviado a {broadcast_addr}:{UDP_PORT}"
+            if retry_count > 0:
+                logger.info(
+                    f"Reintento {retry_count}/{max_retries} para mensaje broadcast..."
+                )
+
+            try:
+                # Fase 1: Enviar header con destino broadcast
+                logger.info(
+                    f"FASE 1: Enviando header LCP broadcast (intento {retry_count+1})"
+                )
+                phase1_success = False
+
+                with self._udp_socket_lock:
+                    for broadcast_addr in broadcast_addresses:
+                        try:
+                            self.udp_socket.sendto(header, (broadcast_addr, UDP_PORT))
+                            logger.info(
+                                f"Header broadcast enviado a {broadcast_addr}:{UDP_PORT}"
+                            )
+                            phase1_success = True
+                        except Exception as e:
+                            logger.error(
+                                f"Error enviando header a {broadcast_addr}: {e}"
+                            )
+
+                    if not phase1_success:
+                        logger.error(
+                            f"No se pudo enviar el header a ninguna dirección de broadcast (intento {retry_count+1})"
                         )
-                        success = True
-                    except Exception as e:
-                        logger.error(f"Error enviando header a {broadcast_addr}: {e}")
+                        retry_count += 1
+                        if retry_count <= max_retries:
+                            time.sleep(retry_delay)
+                        continue
 
-                if not success:
-                    logger.error(
-                        "No se pudo enviar el header a ninguna dirección de broadcast"
+                # Fase 2: Enviar cuerpo del mensaje a broadcast
+                logger.info(
+                    f"FASE 2: Enviando cuerpo del mensaje broadcast ({len(body)} bytes) (intento {retry_count+1})"
+                )
+                phase2_success = False
+
+                with self._udp_socket_lock:
+                    for broadcast_addr in broadcast_addresses:
+                        try:
+                            self.udp_socket.sendto(body, (broadcast_addr, UDP_PORT))
+                            logger.info(
+                                f"Cuerpo broadcast enviado a {broadcast_addr}:{UDP_PORT}"
+                            )
+                            phase2_success = True
+                        except Exception as e:
+                            logger.error(
+                                f"Error enviando cuerpo a {broadcast_addr}: {e}"
+                            )
+
+                if phase2_success:
+                    success = True
+                    break
+                else:
+                    logger.warning(
+                        f"Falló el envío de cuerpo del mensaje broadcast (intento {retry_count+1})"
                     )
-                    return False
+                    retry_count += 1
+                    if retry_count <= max_retries:
+                        time.sleep(retry_delay)
 
-            # Fase 2: Enviar cuerpo del mensaje a broadcast
-            body = message_id.to_bytes(8, "big") + message_bytes
+            except Exception as e:
+                logger.error(
+                    f"Error enviando mensaje broadcast (intento {retry_count+1}): {e}",
+                    exc_info=True,
+                )
+                retry_count += 1
+                if retry_count <= max_retries:
+                    time.sleep(retry_delay)
+
+        if success:
             logger.info(
-                f"FASE 2: Enviando cuerpo del mensaje broadcast ({len(body)} bytes)"
+                f"Mensaje broadcast enviado correctamente después de {retry_count} reintentos"
             )
-
-            with self._udp_socket_lock:
-                for broadcast_addr in broadcast_addresses:
-                    try:
-                        self.udp_socket.sendto(body, (broadcast_addr, UDP_PORT))
-                        logger.info(
-                            f"Cuerpo broadcast enviado a {broadcast_addr}:{UDP_PORT}"
-                        )
-                        success = True
-                    except Exception as e:
-                        logger.error(f"Error enviando cuerpo a {broadcast_addr}: {e}")
-
-            logger.info("Mensaje broadcast enviado correctamente")
             return True
-
-        except Exception as e:
-            logger.error(f"Error enviando mensaje broadcast: {e}", exc_info=True)
+        else:
+            logger.error(
+                f"No se pudo enviar el mensaje broadcast después de {max_retries} reintentos"
+            )
             return False
-        finally:
-            self.udp_socket.settimeout(None)
 
     def register_message_callback(self, callback):
         """Registra una función para recibir mensajes"""
