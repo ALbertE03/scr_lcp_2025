@@ -8,7 +8,6 @@ import queue
 from utils import get_optimal_thread_count
 from main import Peer
 
-
 ctk.set_appearance_mode("System")
 ctk.set_default_color_theme("blue")
 
@@ -24,7 +23,7 @@ class LCPChat(ctk.CTk):
     def __init__(self):
         super().__init__()
 
-        self.title("LCP Chat 2025")
+        self.title("🌐 ConnectiChat LAN 2025 🔮")
         self.geometry("1000x700")
         self.minsize(800, 600)
 
