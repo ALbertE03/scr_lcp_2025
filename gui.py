@@ -305,15 +305,15 @@ class LCPChat(ctk.CTk):
                     progress_data["_last_value"] = progress
 
                     if progress < 25:
-                        progress_bar_color = ("#4a90e2", "#1f6aa5")
+                        progress_bar_color = ("#e74c3c", "#c0392b") 
                     elif progress < 50:
-                        progress_bar_color = ("#3498db", "#2980b9")
+                        progress_bar_color = ("#f39c12", "#d35400") 
                     elif progress < 75:
-                        progress_bar_color = ("#2ecc71", "#27ae60")
+                        progress_bar_color = ("#f1c40f", "#f39c12") 
                     elif progress < 100:
-                        progress_bar_color = ("#f39c12", "#d35400")
+                        progress_bar_color = ("#2ecc71", "#27ae60")  
                     else:
-                        progress_bar_color = ("#2ecc71", "#27ae60")
+                        progress_bar_color = ("#27ae60", "#219653")  
 
                     progress_data["bar"].configure(progress_color=progress_bar_color)
 
